@@ -56,6 +56,8 @@ module or interface:
 - `module-core` — darnit core
 - `module-baseline` — OpenSSF Baseline module
 - `module-amber` — Amber module
+- `module-gittuf` — gittuf module
+- `module-reproducibility` — Reproducibility module
 - `interface-cli` — command-line interface
 - `interface-mcp` — MCP interface
 
@@ -64,6 +66,11 @@ Each module gets its own `module-<name>` label as it lands.
 The `need info` label indicates that more information is needed from the issue
 reporter. Issues that are closed without implementation may use
 `closed-invalid` or `closed-wontfix` to indicate the reason for closure.
+
+The full label set is defined in [`.github/labels.yml`](.github/labels.yml) and
+applied by a sync workflow when that file lands on `main`. Add or change labels
+there rather than in the GitHub web interface, so the taxonomy stays reviewable
+and does not drift from the issue templates.
 
 ## MCP Server Development
 
