@@ -59,6 +59,8 @@ module or interface:
 - `interface-cli` — command-line interface
 - `interface-mcp` — MCP interface
 
+Each module gets its own `module-<name>` label as it lands.
+
 The `need info` label indicates that more information is needed from the issue
 reporter. Issues that are closed without implementation may use
 `closed-invalid` or `closed-wontfix` to indicate the reason for closure.
