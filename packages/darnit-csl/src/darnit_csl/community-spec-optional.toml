@@ -1,0 +1,98 @@
+# =============================================================================
+# darnit-csl - Community Specification, OPTIONAL files (facultative)
+# =============================================================================
+#
+# The Community Specification repo (github.com/CommunitySpecification/1.0) ships
+# nine numbered files, 00 through 08. The required set per the Linux Foundation
+# is 00 to 05 and lives in the main `community-spec` framework. The remaining
+# three are optional ("may not be necessary" per LF), so they are kept in this
+# SEPARATE framework to avoid affecting the required-compliance score:
+#
+#   06-contributing.md     contribution guide
+#   07-spec-template.md    specification document template
+#   08-code-of-conduct.md  Code of Conduct text
+#
+# Facultative: this is a presence check only (no remediation). Run it explicitly
+# and separately from the required audit:
+#
+#   darnit audit --framework community-spec-optional <repo>
+#
+# A FAIL here is informational, not a compliance gap.
+
+# -----------------------------------------------------------------------------
+[metadata]
+name = "community-spec-optional"
+display_name = "Community Specification - optional files (06/07/08)"
+version = "0.1.0"
+schema_version = "0.1.0-alpha"
+spec_version = "CSL 1.0"
+description = "Facultative presence check for the optional Community Specification files (contributing, spec-template, code-of-conduct)"
+url = "https://github.com/CommunitySpecification/1.0"
+
+[defaults]
+check_adapter = "builtin"
+remediation_adapter = "builtin"
+
+# -----------------------------------------------------------------------------
+# CSL-OPT-01  ->  06-contributing.md
+# -----------------------------------------------------------------------------
+[controls."CSL-OPT-01"]
+name = "ContributionGuide"
+description = "Optional: a contribution guide is present (Community Specification file 06-contributing.md, or a repo CONTRIBUTING.md)."
+tags = { level = 1, domain = "CSL", optional = true }
+docs_url = "https://github.com/CommunitySpecification/1.0/blob/main/06-contributing.md"
+location_hint = "06-contributing.md or CONTRIBUTING.md"
+
+[[controls."CSL-OPT-01".passes]]
+handler = "file_exists"
+files = [
+    "governance/06-contributing.md",
+    "license/06-contributing.md",
+    "06-contributing.md",
+    "CONTRIBUTING.md",
+    "docs/CONTRIBUTING.md",
+    ".github/CONTRIBUTING.md",
+]
+
+# -----------------------------------------------------------------------------
+# CSL-OPT-02  ->  07-spec-template.md
+# -----------------------------------------------------------------------------
+[controls."CSL-OPT-02"]
+name = "SpecificationTemplate"
+description = "Optional: a specification document template is present (Community Specification file 07-spec-template.md)."
+tags = { level = 1, domain = "CSL", optional = true }
+docs_url = "https://github.com/CommunitySpecification/1.0/blob/main/07-spec-template.md"
+location_hint = "07-spec-template.md"
+
+[[controls."CSL-OPT-02".passes]]
+handler = "file_exists"
+files = [
+    "governance/07-spec-template.md",
+    "license/07-spec-template.md",
+    "07-spec-template.md",
+    "docs/spec-template.md",
+    "templates/spec-template.md",
+    "SPEC-TEMPLATE.md",
+]
+
+# -----------------------------------------------------------------------------
+# CSL-OPT-03  ->  08-code-of-conduct.md
+# -----------------------------------------------------------------------------
+[controls."CSL-OPT-03"]
+name = "CodeOfConductFile"
+description = "Optional: a Code of Conduct file is present (Community Specification file 08-code-of-conduct.md, or a repo CODE_OF_CONDUCT.md)."
+tags = { level = 1, domain = "CSL", optional = true }
+docs_url = "https://github.com/CommunitySpecification/1.0/blob/main/08-code-of-conduct.md"
+location_hint = "08-code-of-conduct.md or CODE_OF_CONDUCT.md"
+
+[[controls."CSL-OPT-03".passes]]
+handler = "file_exists"
+files = [
+    "governance/08-code-of-conduct.md",
+    "license/08-code-of-conduct.md",
+    "08-code-of-conduct.md",
+    "CODE_OF_CONDUCT.md",
+    "CODE-OF-CONDUCT.md",
+    "docs/CODE_OF_CONDUCT.md",
+    ".github/CODE_OF_CONDUCT.md",
+]

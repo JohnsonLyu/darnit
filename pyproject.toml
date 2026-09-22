@@ -75,6 +75,7 @@ darnit-gittuf = { workspace = true }
 darnit-reproducibility = { workspace = true }
 darnit-hello = { workspace = true }
 darnit-testchecks = { workspace = true }
+darnit-csl = { workspace = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -120,6 +121,7 @@ dev = [
     "darnit-example",
     "darnit-hello",
     "darnit-testchecks",  # framework used by tests/darnit/cli/ (feature 024)
+    "darnit-csl",  # optional CSL 1.0 framework; exercised by tests/darnit_csl
 ]
 
 [tool.mypy]

@@ -143,3 +143,17 @@ class TestTemplateFileResolution:
         assert content is None
         assert "Failed to read template file" in caplog.text
         assert "Simulated race condition" in caplog.text
+
+def test_non_ascii_template_read_as_utf8(tmp_path, executor_factory):
+    body = "# Title\n\nWorking Group\u2019s \u201cScope\u201d \u2014 not retroactive.\n"
+    pkg_dir = tmp_path / "pkg"
+    pkg_dir.mkdir()
+    tmpl_dir = pkg_dir / "templates"
+    tmpl_dir.mkdir()
+    (tmpl_dir / "legal.tmpl").write_text(body, encoding="utf-8")
+    executor = executor_factory(
+        local_path_str=str(tmp_path / "repo"),
+        templates={"legal": TemplateConfig(file="templates/legal.tmpl")},
+        framework_path_str=str(pkg_dir / "framework.toml"),
+    )
+    assert executor._get_template_content("legal") == body
