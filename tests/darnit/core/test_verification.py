@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from darnit.config.operator.schema import PluginSettings
 from darnit.core.verification import (
     DEFAULT_TRUSTED_PUBLISHERS,
     AttestationInfo,
@@ -86,6 +87,59 @@ class TestVerificationConfig:
         all_publishers = config.get_all_trusted_publishers()
         assert "https://github.com/openssf" in all_publishers
         assert "kusari-oss" in all_publishers
+
+
+class TestFromPluginSettings:
+    """Tests for building a VerificationConfig from operator [plugins] settings."""
+
+    def test_none_yields_defaults(self) -> None:
+        """No operator settings leaves every default in place."""
+        config = VerificationConfig.from_plugin_settings(None)
+
+        assert config.allow_unsigned is True
+        assert config.trusted_publishers == []
+
+    def test_unset_allow_unsigned_keeps_default(self) -> None:
+        """A [plugins] table that never mentions signing does not conclude the policy."""
+        config = VerificationConfig.from_plugin_settings(PluginSettings())
+
+        assert config.allow_unsigned is True
+
+    def test_other_keys_do_not_conclude_allow_unsigned(self) -> None:
+        """Setting an unrelated key leaves allow_unsigned unconfigured."""
+        settings = PluginSettings(allowed=["openssf-baseline"])
+        config = VerificationConfig.from_plugin_settings(settings)
+
+        assert config.allow_unsigned is True
+
+    def test_explicit_allow_unsigned_true(self) -> None:
+        """An explicit true is honored."""
+        config = VerificationConfig.from_plugin_settings(PluginSettings(allow_unsigned=True))
+
+        assert config.allow_unsigned is True
+
+    def test_explicit_allow_unsigned_false(self) -> None:
+        """An explicit false is honored."""
+        config = VerificationConfig.from_plugin_settings(PluginSettings(allow_unsigned=False))
+
+        assert config.allow_unsigned is False
+
+    def test_trusted_publishers_pass_through(self) -> None:
+        """The operator's publishers reach the config as a list."""
+        settings = PluginSettings(trusted_publishers=["https://github.com/my-org"])
+        config = VerificationConfig.from_plugin_settings(settings)
+
+        assert config.trusted_publishers == ["https://github.com/my-org"]
+
+    def test_defaults_still_included(self) -> None:
+        """Operator publishers add to DEFAULT_TRUSTED_PUBLISHERS rather than replacing them."""
+        settings = PluginSettings(trusted_publishers=["https://github.com/my-org"])
+        config = VerificationConfig.from_plugin_settings(settings)
+        all_publishers = config.get_all_trusted_publishers()
+
+        assert "https://github.com/my-org" in all_publishers
+        for default in DEFAULT_TRUSTED_PUBLISHERS:
+            assert default in all_publishers
 
 
 class TestVerificationCache:

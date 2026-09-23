@@ -58,7 +58,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    pass
+    from darnit.config.operator.schema import PluginSettings
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +113,32 @@ class VerificationConfig:
     def __post_init__(self) -> None:
         if self.cache_dir is None:
             self.cache_dir = Path.home() / CACHE_DIR_NAME
+
+    @classmethod
+    def from_plugin_settings(cls, settings: PluginSettings | None) -> VerificationConfig:
+        """Build a config from the operator's ``[plugins]`` settings.
+
+        Only an explicitly-configured ``allow_unsigned`` concludes the policy;
+        otherwise this class's default stands, so the feature-040 fail-closed
+        default remains a separate explicit change.
+
+        Args:
+            settings: Operator ``[plugins]`` settings, or None if unconfigured.
+
+        Returns:
+            VerificationConfig reflecting the operator's policy.
+        """
+        if settings is None:
+            return cls()
+
+        kwargs: dict[str, Any] = {
+            "trusted_publishers": list(settings.trusted_publishers),
+        }
+
+        if "allow_unsigned" in settings.model_fields_set:
+            kwargs["allow_unsigned"] = settings.allow_unsigned
+
+        return cls(**kwargs)
 
     def get_all_trusted_publishers(self) -> list[str]:
         """Get complete list of trusted publishers.
