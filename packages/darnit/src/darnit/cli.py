@@ -411,7 +411,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         framework = args.framework
     else:
         from darnit.core.discovery import discover_implementations
-        impls = discover_implementations()
+        impls = discover_implementations(repo_path)
         if len(impls) == 1:
             framework = next(iter(impls))
         else:
