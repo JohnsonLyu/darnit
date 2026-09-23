@@ -5,15 +5,40 @@ Implementations register under the 'darnit.implementations' group.
 """
 
 
+from typing import TYPE_CHECKING
+
 from darnit.core.verification import PluginVerifier, VerificationConfig
 
 from .logging import get_logger
 from .plugin import ComplianceImplementation
 
+if TYPE_CHECKING:
+    from importlib.metadata import EntryPoint
+
 logger = get_logger("core.discovery")
 
 # Cache for discovered implementations
 _implementations: dict[str, ComplianceImplementation] | None = None
+
+
+def _resolve_distribution_name(ep: "EntryPoint") -> str:
+    """Return the installed distribution name backing an entry point.
+
+    Verification looks plugins up by distribution name (``darnit-baseline``),
+    not by the entry-point slug (``openssf-baseline``). Entry points built by
+    hand have no ``dist``, so fall back to the slug.
+    """
+    dist = getattr(ep, "dist", None)
+    dist_name = getattr(dist, "name", None) if dist is not None else None
+    if dist_name:
+        return dist_name
+
+    logger.debug(
+        "Entry point '%s' carries no distribution metadata; verifying under "
+        "the entry-point name instead.",
+        ep.name,
+    )
+    return ep.name
 
 
 def discover_implementations() -> dict[str, ComplianceImplementation]:
@@ -36,14 +61,16 @@ def discover_implementations() -> dict[str, ComplianceImplementation]:
 
     for ep in eps:
         try:
+            dist_name = _resolve_distribution_name(ep)
+
             try:
-                verification_result = verifier.verify_plugin(ep.name)
+                verification_result = verifier.verify_plugin(dist_name)
             except Exception as e:
-                    logger.warning(
-                        f"Plugin verification errored for '{ep.name}', loading anyway because "
-                        f"allow_unsigned=True: {e}"
-                    )
-                    verification_result = None
+                logger.warning(
+                    f"Plugin verification errored for '{ep.name}', loading anyway because "
+                    f"allow_unsigned=True: {e}"
+                )
+                verification_result = None
 
             if verification_result is not None and not verification_result.verified:
                 message = verification_result.error or verification_result.warning or "unknown verification failure"
