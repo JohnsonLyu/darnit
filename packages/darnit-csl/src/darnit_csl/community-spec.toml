@@ -1,0 +1,637 @@
+# =============================================================================
+# darnit-csl - Community Specification License (CSL 1.0) compliance
+# =============================================================================
+#
+# Implements the file set the Linux Foundation / Joint Development Foundation
+# requires for a repository that develops a specification under the
+# Community Specification License 1.0:
+#
+#   governance/00-contributor-license-agreement.md   (static)
+#   governance/01-community-specification-license-v1.md (static)
+#   governance/02-scope.md            (per-project - the "art"; LLM-drafted)
+#   governance/03-notices.md          (Code of Conduct contacts)
+#   governance/04-license.md          (dual: CSL for spec, MIT/Apache for code)
+#   governance/05-governance.md       (full CSL policy OR reference an umbrella
+#                                       project's governance, e.g. CNCF)
+#
+# Each control follows the same 7 steps:
+#   1. Look in .project/ for confirmed context
+#   2. Does the file exist (governance/, license/, or repo root)?
+#   3. Is the content valid (no leftover template placeholders)?  -> PASS, done
+#   4. If not, collect data and ask the user (requires_context prompts)
+#   5. Persist answers to .project/ (project_update + context store_as)
+#   6. Generate the file from a template (file_create)
+#   7. Refine the generated file from project context via the LLM (llm_enhance)
+#
+# The directory the LF asks for can be /governance OR /license; this plugin
+# treats `governance/` as canonical for generation and accepts either (plus the
+# repo root) when auditing.
+
+# -----------------------------------------------------------------------------
+[metadata]
+name = "community-spec"
+display_name = "Community Specification License (CSL 1.0)"
+version = "0.1.0"
+schema_version = "0.1.0-alpha"
+spec_version = "CSL 1.0"
+description = "Compliance for repositories that develop specifications under the Community Specification License 1.0"
+url = "https://github.com/CommunitySpecification/1.0"
+
+[defaults]
+check_adapter = "builtin"
+remediation_adapter = "builtin"
+
+# -----------------------------------------------------------------------------
+# MCP integration. Built-in audit + list tools are enough for a TOML-only
+# plugin; remediation is driven generically from the [remediation] blocks below.
+# -----------------------------------------------------------------------------
+[mcp]
+name = "community-spec"
+description = "Audit and remediate Community Specification License (CSL 1.0) compliance."
+
+[mcp.tools.audit_community_spec]
+builtin = "audit"
+description = "Run the CSL 1.0 compliance audit on a specification repository."
+
+[mcp.tools.list_community_spec_controls]
+builtin = "list_controls"
+description = "List the CSL 1.0 compliance controls."
+
+# Write phase: renders every CSL file from templates using client-supplied
+# context (the client drafts the Scope first). Module-path handler, not a
+# builtin, so it lives in the plugin.
+[mcp.tools.remediate_community_spec]
+handler = "darnit_csl.mcp_tools:remediate_community_spec"
+description = "Write the CSL 1.0 file set (governance/00..05) into a spec repo from a drafted scope and context, then re-audit. Code of Conduct is org-first: BEFORE calling, check whether the project already has one (a repo CODE_OF_CONDUCT file, the org's community or .github repo, or a foundation CoC such as CNCF, LF, or JDF). If it does, pass coc_policy='org' with coc_reference = one markdown sentence linking it; the notices will point there and name no individuals. Only when no such CoC exists, pass two named individuals in coc_contacts (never a mailing list)."
+
+# -----------------------------------------------------------------------------
+# Audit profiles
+# -----------------------------------------------------------------------------
+[audit_profiles.required_files]
+description = "The files the LF requires in the spec repo (CLA, license, scope, notices, licenses, governance)."
+controls = [
+    "CSL-01.01", "CSL-01.02", "CSL-02.01",
+    "CSL-03.01", "CSL-04.01", "CSL-05.01",
+]
+
+[audit_profiles.discoverability]
+description = "Scope and notices must be easy to discover from the README."
+controls = ["CSL-06.01"]
+
+# -----------------------------------------------------------------------------
+# Templates
+# -----------------------------------------------------------------------------
+[templates.csl_cla]
+description = "Community Specification Contributor License Agreement 1.0 (verbatim)."
+file = "templates/csl_cla.tmpl"
+
+[templates.csl_license]
+description = "Community Specification License 1.0 (verbatim)."
+file = "templates/csl_license.tmpl"
+
+[templates.csl_scope]
+description = "Scope statement - filled from context or left as a detectable placeholder for LLM drafting."
+file = "templates/csl_scope.tmpl"
+
+[templates.csl_notices]
+description = "Notices file with Code of Conduct contact(s) and license-acceptance sections."
+file = "templates/csl_notices.tmpl"
+
+[templates.csl_license_dual]
+description = "Dual license file: CSL for the spec, selectable code license for source."
+file = "templates/csl_license_dual.tmpl"
+
+[templates.csl_governance]
+description = "Full Community Specification Governance Policy 1.0 (verbatim)."
+file = "templates/csl_governance.tmpl"
+
+[templates.csl_governance_reference]
+description = "Governance stub that references an umbrella project's governance (e.g. CNCF) instead of subsuming it."
+file = "templates/csl_governance_reference.tmpl"
+
+# =============================================================================
+# Context keys (the questions asked in step 4; persisted in step 5)
+# =============================================================================
+
+[context.csl_spec_name]
+type = "string"
+prompt = "What is the human-readable name of the specification / Working Group?"
+hint = "Used in generated documents. Defaults to the repository name."
+examples = ["The Update Framework (TUF)", "in-toto Attestation"]
+affects = ["CSL-02.01", "CSL-03.01"]
+store_as = "legal.csl.spec_name"
+required = false
+
+[context.csl_working_group_scope]
+type = "string"
+prompt = "Describe the Scope of this Working Group (what the specification covers)."
+hint = "This sets the bounds of each contributor's and licensee's patent commitment. You may provide prose here, or leave it blank and let the agent draft a Scope from the repository, which you then review."
+no_detect_hint = "No existing Scope statement was found. Provide a description, or let the agent draft one for your review."
+examples = ["This Working Group standardizes the metadata format and verification workflow for ..."]
+affects = ["CSL-02.01"]
+store_as = "legal.csl.scope_text"
+required = false
+
+[context.csl_coc_contacts]
+type = "string"
+prompt = "Who receives Code of Conduct complaints for this Working Group? List two named individuals (not a mailing list)."
+hint = "Names plus a contact handle/email each. Two people are recommended so a complaint about one can go to the other."
+examples = ["Jane Doe (jane@example.org), John Roe (@johnroe)"]
+affects = ["CSL-03.01"]
+store_as = "legal.csl.coc_contacts"
+required = false
+
+[context.csl_coc_policy]
+type = "enum"
+values = ["csl", "umbrella"]
+prompt = "For the Code of Conduct, ship the Community Specification CoC, or reference an umbrella project's CoC (e.g. CNCF)?"
+hint = "'csl' = use the CoC that ships with Community Specification. 'umbrella' = cite an existing CoC such as the CNCF Code of Conduct."
+affects = ["CSL-03.01"]
+store_as = "legal.csl.coc_policy"
+required = false
+
+[context.csl_coc_reference]
+type = "string"
+prompt = "If referencing an umbrella Code of Conduct, name and link it."
+hint = "Only needed when the CoC policy is 'umbrella'."
+examples = ["CNCF Code of Conduct (https://github.com/cncf/foundation/blob/main/code-of-conduct.md)"]
+affects = ["CSL-03.01"]
+store_as = "legal.csl.coc_reference"
+required = false
+
+[context.csl_governance_mode]
+type = "enum"
+values = ["csl", "umbrella"]
+prompt = "For governance, adopt the full Community Specification Governance Policy, or reference an existing umbrella governance (e.g. CNCF) and keep only the CSL roles?"
+hint = "'csl' = ship the full Community Specification Governance Policy 1.0. 'umbrella' = reference the project's existing governance (it is not superseded) and document the CSL roles/decision-making on top."
+affects = ["CSL-05.01"]
+store_as = "legal.csl.governance_mode"
+required = false
+
+[context.csl_governance_reference]
+type = "string"
+prompt = "If referencing an umbrella governance, name and link it."
+hint = "Only needed when the governance mode is 'umbrella'."
+examples = ["CNCF project governance (https://github.com/cncf/foundation/blob/main/charter.md)"]
+affects = ["CSL-05.01"]
+store_as = "legal.csl.governance_reference"
+required = false
+
+[context.csl_code_license]
+type = "string"
+prompt = "Which license applies to source/sample code in the spec repo?"
+hint = "Any SPDX identifier. The Community Specification default is MIT; projects also use Apache-2.0, BSD-3-Clause, or copyleft licenses such as AGPL-3.0 (e.g. TAF)."
+examples = ["MIT", "Apache-2.0", "AGPL-3.0", "BSD-3-Clause"]
+affects = ["CSL-04.01"]
+store_as = "legal.csl.code_license"
+required = false
+
+# =============================================================================
+# Controls
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# CSL-01.01 - Contributor License Agreement (static)
+# -----------------------------------------------------------------------------
+[controls."CSL-01.01"]
+name = "ContributorLicenseAgreement"
+description = "The spec repo contains the Community Specification Contributor License Agreement."
+tags = { level = 1, domain = "CSL", legal = true }
+docs_url = "https://github.com/CommunitySpecification/1.0"
+location_hint = "governance/00-contributor-license-agreement.md"
+help_md = """Add the Community Specification CLA to the repository where the
+specification is developed.
+
+**Remediation:** create `governance/00-contributor-license-agreement.md`."""
+
+# Content/title detection FIRST: catch the CLA even if stored under a different
+# filename. Match the CSL CLA heading in any likely location.
+[[controls."CSL-01.01".passes]]
+handler = "regex"
+files = [
+    "CLA.md", "CLA",
+    "governance/*.md", "license/*.md",
+    "governance/00-contributor-license-agreement.md",
+    "license/00-contributor-license-agreement.md",
+    "00-contributor-license-agreement.md",
+]
+
+[controls."CSL-01.01".passes.pattern.patterns]
+csl_cla_title = '(?im)^#+\s*Community Specification Contributor License Agreement\b'
+
+# Name-based fallback: conclusive FAIL when no CLA file exists at all.
+[[controls."CSL-01.01".passes]]
+handler = "file_exists"
+files = [
+    "governance/00-contributor-license-agreement.md",
+    "license/00-contributor-license-agreement.md",
+    "00-contributor-license-agreement.md",
+]
+
+[[controls."CSL-01.01".passes]]
+handler = "manual"
+steps = [
+    "Confirm the Community Specification CLA is present in the spec repo.",
+    "It should sit alongside the license files in /governance or /license.",
+]
+
+[controls."CSL-01.01".remediation]
+safe = true
+dry_run_supported = true
+
+[[controls."CSL-01.01".remediation.handlers]]
+handler = "file_create"
+path = "governance/00-contributor-license-agreement.md"
+template = "csl_cla"
+overwrite = false
+
+[controls."CSL-01.01".remediation.project_update]
+set = { "legal.csl.cla.path" = "governance/00-contributor-license-agreement.md" }
+
+# -----------------------------------------------------------------------------
+# CSL-01.02 - Community Specification License file (static)
+# -----------------------------------------------------------------------------
+[controls."CSL-01.02"]
+name = "SpecificationLicense"
+description = "The spec repo contains the Community Specification License 1.0 text."
+tags = { level = 1, domain = "CSL", legal = true, license = true }
+docs_url = "https://github.com/CommunitySpecification/1.0"
+location_hint = "governance/01-community-specification-license-v1.md"
+help_md = """Add the Community Specification License 1.0 text to the spec repo.
+
+**Remediation:** create `governance/01-community-specification-license-v1.md`."""
+
+# Content/title detection FIRST: the CSL license may be stored under any
+# filename (e.g. TUF ships it as LICENSE.md). Match the CSL heading in any
+# likely location. PASS if found, FAIL if a license-ish file exists but is not
+# CSL, INCONCLUSIVE if no candidate files (falls through to the name check).
+[[controls."CSL-01.02".passes]]
+handler = "regex"
+files = [
+    "LICENSE.md", "LICENSE", "LICENSE.txt", "LICENSE-CSL.md", "COPYING", "COPYING.md",
+    "governance/*.md", "license/*.md",
+    "governance/01-community-specification-license-v1.md",
+    "license/01-community-specification-license-v1.md",
+    "01-community-specification-license-v1.md",
+]
+
+[controls."CSL-01.02".passes.pattern.patterns]
+csl_license_title = '(?im)^#+\s*Community Specification License\b'
+
+# Name-based fallback: conclusive FAIL when no license file exists at all.
+[[controls."CSL-01.02".passes]]
+handler = "file_exists"
+files = [
+    "governance/01-community-specification-license-v1.md",
+    "license/01-community-specification-license-v1.md",
+    "01-community-specification-license-v1.md",
+    "governance/01-community-specification-license-v1.0.md",
+]
+
+[[controls."CSL-01.02".passes]]
+handler = "manual"
+steps = ["Confirm the Community Specification License 1.0 text is present in the spec repo."]
+
+[controls."CSL-01.02".remediation]
+safe = true
+dry_run_supported = true
+
+[[controls."CSL-01.02".remediation.handlers]]
+handler = "file_create"
+path = "governance/01-community-specification-license-v1.md"
+template = "csl_license"
+overwrite = false
+
+[controls."CSL-01.02".remediation.project_update]
+set = { "legal.csl.license.path" = "governance/01-community-specification-license-v1.md" }
+
+# -----------------------------------------------------------------------------
+# CSL-02.01 - Working Group Scope (content-validated; LLM-drafted)
+# -----------------------------------------------------------------------------
+[controls."CSL-02.01"]
+name = "WorkingGroupScope"
+description = "The repo has a Scope statement, filled in (not the template placeholder)."
+tags = { level = 1, domain = "CSL", legal = true }
+docs_url = "https://github.com/CommunitySpecification/1.0"
+location_hint = "governance/02-scope.md"
+help_md = """Provide a Scope statement. The Scope establishes the bounds of each
+contributor's and licensee's patent commitment, so a placeholder is not enough.
+
+**Remediation:** create `governance/02-scope.md` and describe the Working
+Group's scope (the agent can draft this from the repository for your review)."""
+
+# Step 3 (content): under `darnit serve` the LLM judges the scope FIRST, so it
+# catches weak or off-topic scopes that regex cannot. Under `darnit audit`
+# (no LLM) the sieve stops here and reports PENDING_LLM; the deterministic
+# regex/existence passes below still answer non-LLM callers.
+[[controls."CSL-02.01".passes]]
+handler = "csl_llm_if_present"
+prompt = """Evaluate whether the Scope statement actually describes the bounds of
+this specification's work (what it standardizes and what it excludes). FAIL if it
+contains only the bracketed '[Include a detailed description ...]' placeholder or
+is too vague to bound a patent commitment. Otherwise PASS."""
+files_to_include = ["governance/02-scope.md", "license/02-scope.md", "02-scope.md"]
+confidence_threshold = 0.7
+
+# Deterministic fallback: PASS only if the file exists AND no longer contains the
+# bracketed template placeholder. (Missing file -> INCONCLUSIVE -> next pass.)
+[[controls."CSL-02.01".passes]]
+handler = "regex"
+files = ["governance/02-scope.md", "license/02-scope.md", "02-scope.md"]
+
+[controls."CSL-02.01".passes.pattern.patterns]
+scope_filled = '(?s)\A(?!.*\[Include a detailed description).+\S'
+
+# Existence. Reached only when the file is missing -> conclusive FAIL.
+[[controls."CSL-02.01".passes]]
+handler = "file_exists"
+files = ["governance/02-scope.md", "license/02-scope.md", "02-scope.md"]
+
+[[controls."CSL-02.01".passes]]
+handler = "manual"
+steps = ["Confirm governance/02-scope.md describes the Working Group's scope and is not a placeholder."]
+
+[controls."CSL-02.01".remediation]
+safe = true
+dry_run_supported = true
+
+# Only runs when the control FAILS (missing or placeholder), so overwrite is safe.
+[[controls."CSL-02.01".remediation.handlers]]
+handler = "file_create"
+path = "governance/02-scope.md"
+template = "csl_scope"
+overwrite = true
+llm_enhance = "Draft a precise Scope statement for governance/02-scope.md. Read the README and specification sources to describe exactly what this Working Group standardizes and the boundary of the work - this sets the bounds of the contributors' and licensees' patent commitment. Replace the bracketed placeholder entirely. Keep the final line 'Any changes of Scope are not retroactive.'"
+
+# Step 4: ask for scope (optional - the agent may draft it instead).
+[[controls."CSL-02.01".remediation.requires_context]]
+key = "csl_working_group_scope"
+required = false
+warning = "A Scope statement defines the patent commitment. Provide one, or let the agent draft it from the repository for your review."
+
+[controls."CSL-02.01".remediation.project_update]
+set = { "legal.csl.scope.path" = "governance/02-scope.md" }
+
+# -----------------------------------------------------------------------------
+# CSL-03.01 - Notices + Code of Conduct contact (content-validated)
+# -----------------------------------------------------------------------------
+[controls."CSL-03.01"]
+name = "NoticesAndCodeOfConductContact"
+description = "The repo has a Notices file with a real Code of Conduct contact or an org-level Code of Conduct reference (no blank line, no leftover drafting guidance)."
+tags = { level = 1, domain = "CSL", legal = true, governance = true }
+docs_url = "https://github.com/CommunitySpecification/1.0"
+location_hint = "governance/03-notices.md"
+help_md = """Provide the Notices file and fill in who receives Code of Conduct
+complaints (org-first: point at an existing project/org Code of Conduct; otherwise two named individuals).
+
+**Remediation:** create `governance/03-notices.md` and set the CoC contact(s)."""
+
+# Step 3 (content): under `darnit serve` the LLM judges the CoC contact FIRST.
+# Under `darnit audit` (no LLM) the sieve stops here (PENDING_LLM); the
+# deterministic passes below still answer non-LLM callers.
+[[controls."CSL-03.01".passes]]
+handler = "csl_llm_if_present"
+prompt = """Evaluate the Notices file's Code of Conduct section. PASS if it either
+names a real, reachable contact (a person or role plus an email or handle) OR
+points to an established project/org-level Code of Conduct (the repo's own CoC,
+an org community CoC, or a foundation CoC such as CNCF / LF / JDF) via a working
+reference. FAIL if the contact line is still a blank ('_________________'), the
+bracketed drafting guidance ('[Ideally list two different individuals ...]') is
+still present, or neither a contact nor such a reference is given."""
+files_to_include = ["governance/03-notices.md", "license/03-notices.md", "03-notices.md"]
+confidence_threshold = 0.7
+
+# Deterministic fallback: PASS only if the file exists AND the CoC contact line
+# is filled (no 5+ underscore blank). Missing -> INCONCLUSIVE -> next pass.
+[[controls."CSL-03.01".passes]]
+handler = "regex"
+files = ["governance/03-notices.md", "license/03-notices.md", "03-notices.md"]
+
+[controls."CSL-03.01".passes.pattern.patterns]
+coc_contact_filled = '(?s)\A(?!.*_{5,})(?!.*\[Ideally list two different individuals)(?!.*(?i:real name|real@email|example\.(com|org|net)|\bTODO\b|\bFIXME\b|\bTBD\b|<name>|<email>|your name|firstname|lastname|insert name|name one|name two|john doe|jane doe)).+\S'
+
+# Existence -> conclusive FAIL when missing.
+[[controls."CSL-03.01".passes]]
+handler = "file_exists"
+files = ["governance/03-notices.md", "license/03-notices.md", "03-notices.md"]
+
+[[controls."CSL-03.01".passes]]
+handler = "manual"
+steps = ["Confirm governance/03-notices.md names a Code of Conduct contact (two individuals recommended)."]
+
+[controls."CSL-03.01".remediation]
+safe = true
+dry_run_supported = true
+
+# Step 4: the CoC contact genuinely needs human input -> required = true (blocks
+# until confirmed). coc_policy / coc_reference are optional refinements.
+[[controls."CSL-03.01".remediation.requires_context]]
+key = "csl_coc_contacts"
+required = false
+warning = "Org-first: if the project already has a Code of Conduct (repo file, org community repo, or a foundation CoC such as CNCF/LF/JDF), set csl_coc_policy='org' with csl_coc_reference and leave contacts empty. Otherwise two named individuals are recommended (never a generic mailing list)."
+
+[[controls."CSL-03.01".remediation.requires_context]]
+key = "csl_coc_policy"
+required = false
+
+[[controls."CSL-03.01".remediation.requires_context]]
+key = "csl_coc_reference"
+required = false
+
+[[controls."CSL-03.01".remediation.handlers]]
+handler = "file_create"
+path = "governance/03-notices.md"
+template = "csl_notices"
+overwrite = true
+
+[controls."CSL-03.01".remediation.project_update]
+set = { "legal.csl.notices.path" = "governance/03-notices.md" }
+
+# -----------------------------------------------------------------------------
+# CSL-04.01 - Specification + source code licenses (dual)
+# -----------------------------------------------------------------------------
+[controls."CSL-04.01"]
+name = "SpecificationAndCodeLicenses"
+description = "The repo clarifies that the spec is under CSL and any code is under MIT/Apache."
+tags = { level = 1, domain = "CSL", legal = true, license = true }
+docs_url = "https://github.com/CommunitySpecification/1.0"
+location_hint = "governance/04-license.md"
+help_md = """Clarify the two licenses: the Community Specification License for the
+spec, and a source-code license (MIT by default, or Apache-2.0) for any code.
+
+**Remediation:** create `governance/04-license.md`."""
+
+[[controls."CSL-04.01".passes]]
+handler = "file_exists"
+files = ["governance/04-license.md", "license/04-license.md", "04-license.md"]
+
+[[controls."CSL-04.01".passes]]
+handler = "manual"
+steps = ["Confirm governance/04-license.md states CSL for the spec and a code license for source."]
+
+[controls."CSL-04.01".remediation]
+safe = true
+dry_run_supported = true
+
+[[controls."CSL-04.01".remediation.requires_context]]
+key = "csl_code_license"
+required = false
+
+[[controls."CSL-04.01".remediation.handlers]]
+handler = "file_create"
+path = "governance/04-license.md"
+template = "csl_license_dual"
+overwrite = false
+
+[controls."CSL-04.01".remediation.project_update]
+set = { "legal.csl.licenses.path" = "governance/04-license.md" }
+
+# -----------------------------------------------------------------------------
+# CSL-05.01 - Governance policy (full CSL, or reference an umbrella)
+# -----------------------------------------------------------------------------
+[controls."CSL-05.01"]
+name = "GovernancePolicy"
+description = "The repo has a governance policy: the full CSL policy, or a reference to an umbrella project's governance."
+tags = { level = 1, domain = "CSL", governance = true }
+docs_url = "https://github.com/CommunitySpecification/1.0"
+location_hint = "governance/05-governance.md"
+help_md = """Provide a governance policy. Either adopt the full Community
+Specification Governance Policy, or, if the project already follows an umbrella
+governance (e.g. CNCF) - reference that and document the CSL roles on top of it.
+
+**Remediation:** create `governance/05-governance.md` in the chosen mode."""
+
+# Under `darnit serve` the LLM judges governance FIRST: is this genuinely CSL
+# governance (roles, decision-making, an umbrella reference) rather than a
+# passing mention. Under `darnit audit` (no LLM) the sieve stops here
+# (PENDING_LLM); the deterministic content/existence passes below answer
+# non-LLM callers.
+[[controls."CSL-05.01".passes]]
+handler = "csl_llm_if_present"
+prompt = """Evaluate whether this repository's governance is tied to the
+Community Specification process. PASS if it is the full Community Specification
+Governance Policy, OR references an umbrella project's governance (e.g. CNCF)
+while documenting the Community Specification roles/decision-making. FAIL if the
+only governance is generic project governance with no Community Specification
+tie, or if no governance file exists."""
+files_to_include = [
+    "governance/05-governance.md",
+    "GOVERNANCE.md",
+    "governance/GOVERNANCE.md",
+    "docs/GOVERNANCE.md",
+]
+confidence_threshold = 0.7
+
+# Content detection FIRST: governance must be CSL-specific. Both the full CSL
+# policy (title "Community Specification Governance Policy") and the umbrella
+# reference stub (which documents the Community Specification process/roles)
+# match. A generic GOVERNANCE.md that never mentions Community Specification
+# does not, so it FAILs (the email calls for reconciling existing governance).
+[[controls."CSL-05.01".passes]]
+handler = "regex"
+files = [
+    "governance/05-governance.md",
+    "license/05-governance.md",
+    "05-governance.md",
+    "GOVERNANCE.md",
+    "governance/GOVERNANCE.md",
+    "docs/GOVERNANCE.md",
+    ".github/GOVERNANCE.md",
+]
+
+[controls."CSL-05.01".passes.pattern.patterns]
+csl_governance_content = '(?i)Community Specification (Governance|Process|Roles)'
+
+# Name-based fallback: conclusive FAIL when no governance file exists at all.
+[[controls."CSL-05.01".passes]]
+handler = "file_exists"
+files = [
+    "governance/05-governance.md",
+    "license/05-governance.md",
+    "05-governance.md",
+    "GOVERNANCE.md",
+    "governance/GOVERNANCE.md",
+    "docs/GOVERNANCE.md",
+    ".github/GOVERNANCE.md",
+]
+
+[[controls."CSL-05.01".passes]]
+handler = "manual"
+steps = ["Confirm a governance policy is present (full CSL policy, or a reference to the umbrella governance with CSL roles documented)."]
+
+[controls."CSL-05.01".remediation]
+safe = true
+dry_run_supported = true
+strategy = "first_match"
+
+# Step 4: which governance mode? (optional; defaults to the full CSL policy.)
+[[controls."CSL-05.01".remediation.requires_context]]
+key = "csl_governance_mode"
+required = false
+warning = "If the project already follows an umbrella governance (e.g. CNCF), choose 'umbrella' to reference it rather than subsume it."
+
+[[controls."CSL-05.01".remediation.requires_context]]
+key = "csl_governance_reference"
+required = false
+
+# Umbrella mode: reference existing governance (tried first).
+[[controls."CSL-05.01".remediation.handlers]]
+handler = "file_create"
+path = "governance/05-governance.md"
+template = "csl_governance_reference"
+overwrite = false
+when = { csl_governance_mode = "umbrella" }
+llm_enhance = "If an umbrella governance was referenced, ensure governance/05-governance.md links it correctly and remove any leftover TODO placeholder. Do not restate the full umbrella policy - only reference it and keep the Community Specification roles and decision-making section."
+
+# Default: ship the full Community Specification Governance Policy.
+[[controls."CSL-05.01".remediation.handlers]]
+handler = "file_create"
+path = "governance/05-governance.md"
+template = "csl_governance"
+overwrite = false
+
+[controls."CSL-05.01".remediation.project_update]
+set = { "legal.csl.governance.path" = "governance/05-governance.md" }
+
+# -----------------------------------------------------------------------------
+# CSL-06.01 - Scope & Notices are discoverable from the README (level 2)
+# -----------------------------------------------------------------------------
+[controls."CSL-06.01"]
+name = "GovernanceDocsDiscoverable"
+description = "The README links the scope and notices files so they are easy to discover."
+tags = { level = 2, domain = "CSL", documentation = true }
+docs_url = "https://github.com/CommunitySpecification/1.0"
+location_hint = "README.md"
+help_md = """The LF asks that the scope and notices files be easy to discover.
+Reference them (and the /governance directory) from the README.
+
+**Remediation:** add links to governance/02-scope.md and governance/03-notices.md
+in the README."""
+
+[[controls."CSL-06.01".passes]]
+handler = "regex"
+files = ["README.md", "readme.md", "README.rst"]
+pass_if_any = false
+
+[controls."CSL-06.01".passes.pattern.patterns]
+links_scope = '(?i)02-scope|/scope|\bscope\.md'
+links_notices = '(?i)03-notices|/notices|\bnotices\.md'
+
+[[controls."CSL-06.01".passes]]
+handler = "manual"
+steps = [
+    "Confirm the README links to the Scope statement (governance/02-scope.md).",
+    "Confirm the README links to the Notices file (governance/03-notices.md).",
+]
+
+[controls."CSL-06.01".remediation]
+safe = true
+dry_run_supported = true
+
+[[controls."CSL-06.01".remediation.handlers]]
+handler = "manual"
+steps = [
+    "Add a short 'Governance & Licensing' section to the README.",
+    "Link governance/02-scope.md (Scope) and governance/03-notices.md (Notices).",
+    "Optionally link the /governance directory and governance/04-license.md.",
+]

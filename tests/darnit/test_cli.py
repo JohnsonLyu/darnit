@@ -270,20 +270,32 @@ class TestFormatting:
                 {"id": "FAIL-01", "status": "FAIL", "details": "", "level": 1},
                 {"id": "WARN-01", "status": "WARN", "details": "", "level": 1},
                 {"id": "NA-01", "status": "N/A", "details": "", "level": 1},
+                {
+                    "id": "ERROR-01",
+                    "status": "ERROR",
+                    "details": "Command not found: zizmor",
+                    "level": 1,
+                    "error_class": "not_found",
+                },
+                {"id": "PENDING-01", "status": "PENDING_LLM", "details": "", "level": 1},
             ],
             "openssf-baseline",
         )
         payload = json.loads(rendered)
 
         assert payload["framework"] == "openssf-baseline"
-        assert len(payload["results"]) == 4
+        assert len(payload["results"]) == 6
         assert payload["summary"] == {
-            "total": 4,
+            "total": 6,
             "pass": 1,
             "fail": 1,
             "warn": 1,
             "na": 1,
+            "error": 1,
+            "pending_llm": 1,
         }
+        assert payload["summary"]["error"] == 1
+        assert payload["summary"]["pending_llm"] == 1
 
 
 @pytest.mark.unit
@@ -320,3 +332,70 @@ def test_format_results_text_show_all_lists_every_check():
     for i in range(15):
         assert f"OSPS-X-{i:02d}" in rendered
     assert "OSPS-NA-01.01" in rendered
+
+
+def _mixed_results() -> list[dict]:
+    """One result per CheckStatus, so no bucket can hide behind another."""
+    return [
+        {"id": "OSPS-PASS-01.01", "status": "PASS", "details": "satisfied", "level": 1},
+        {"id": "OSPS-FAIL-01.01", "status": "FAIL", "details": "not satisfied", "level": 1},
+        {"id": "OSPS-WARN-01.01", "status": "WARN", "details": "needs verification", "level": 1},
+        {"id": "OSPS-NA-01.01", "status": "N/A", "details": "not applicable", "level": 1},
+        {
+            "id": "OSPS-BR-01.01",
+            "status": "ERROR",
+            "details": "Command not found: zizmor",
+            "level": 1,
+            "error_class": "not_found",
+        },
+        {
+            "id": "OSPS-LLM-01.01",
+            "status": "PENDING_LLM",
+            "details": "Awaiting LLM analysis",
+            "level": 1,
+        },
+    ]
+
+
+@pytest.mark.unit
+def test_format_results_text_shows_errors_without_show_all():
+    """ERROR results are shown without --show-all."""
+    rendered = format_results_text(_mixed_results(), "openssf-baseline")
+
+    assert "--- Errors (1) ---" in rendered
+    assert "OSPS-BR-01.01" in rendered
+    assert "Command not found: zizmor" in rendered
+    assert "[not_found]" in rendered
+
+
+@pytest.mark.unit
+def test_format_results_text_shows_pending_llm_without_show_all():
+    """PENDING_LLM results are shown without --show-all."""
+    rendered = format_results_text(_mixed_results(), "openssf-baseline")
+
+    assert "--- Pending LLM (1) ---" in rendered
+    assert "OSPS-LLM-01.01" in rendered
+    assert "Awaiting LLM analysis" in rendered
+
+
+@pytest.mark.unit
+def test_format_results_text_summary_counts_account_for_total():
+    """The summary includes every status count."""
+    rendered = format_results_text(_mixed_results(), "openssf-baseline")
+
+    assert "Total: 6 | Pass: 1 | Fail: 1 | Warn: 1 | N/A: 1 | Error: 1 | Pending LLM: 1" in rendered
+
+
+@pytest.mark.unit
+def test_format_results_text_show_all_does_not_duplicate_sections():
+    """--show-all does not duplicate ERROR or PENDING_LLM results."""
+    rendered = format_results_text(_mixed_results(), "openssf-baseline", show_all=True)
+
+    assert rendered.count("OSPS-BR-01.01") == 1
+    assert rendered.count("OSPS-LLM-01.01") == 1
+    assert rendered.count("--- Errors (1) ---") == 1
+    assert rendered.count("--- Pending LLM (1) ---") == 1
+    assert "--- ERROR (" not in rendered
+    assert "--- PENDING_LLM (" not in rendered
+    assert "--- N/A (1) ---" in rendered
+    assert rendered.count("OSPS-NA-01.01") == 1

@@ -5,6 +5,7 @@ They are deliberately conservative — when in doubt, return INCONCLUSIVE
 rather than falsely passing or failing.
 """
 
+import re
 import tomllib
 from pathlib import Path
 from typing import Any, Literal
@@ -15,6 +16,9 @@ from darnit.sieve.handler_registry import HandlerContext, HandlerResult, Handler
 from .witness_attestation import WitnessCheckResult, check_witness_attestation
 
 logger = get_logger("darnit_reproducibility.handlers")
+
+
+_MAX_EVIDENCE_EXAMPLES = 10
 
 
 def _pyproject_declares_dependencies(path: Path) -> bool:
@@ -31,19 +35,49 @@ def _pyproject_declares_dependencies(path: Path) -> bool:
     )
 
 
+def _inspect_requirements(path: Path) -> tuple[Any, str | None]:
+    """Read and classify a requirements.txt.
+
+    Returns ``(report, unreadable_reason)``. Exactly one is meaningful. The
+    classifier is deliberately NOT called when the file cannot be read or
+    decoded -- "we read it and it is unpinned" and "we could not read it" are
+    different claims and must stay distinguishable (FR-007).
+    """
+    from .requirements_pins import classify
+
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        return None, f"not valid UTF-8 ({exc.reason})"
+    except OSError as exc:
+        return None, f"could not be read ({exc.strerror or type(exc).__name__})"
+    return classify(text), None
+
+
+def _sample(items: list[str]) -> list[str]:
+    """Cap enumerated evidence so a 400-requirement file stays readable."""
+    return items[:_MAX_EVIDENCE_EXAMPLES]
+
+
 def repro_deps_pinned_handler(
     config: dict[str, Any],
     ctx: HandlerContext,
 ) -> HandlerResult:
     """Check that dependencies are pinned to exact versions.
 
-    Looks for lock files — the most reliable signal that deps are pinned.
-    PASS if a lock file exists, FAIL if only a loose manifest exists,
-    INCONCLUSIVE if no dependency files found at all.
+    A lock file is the strongest signal and short-circuits everything else.
+    Failing that, a `requirements.txt` is READ rather than merely noticed
+    (feature 037, issue #429): a file pinned with hashes passes, one pinned
+    with `==` alone warns because its transitive dependencies still float, and
+    one with open ranges fails naming an offender.
+
+    Every other loose manifest is still judged by presence alone; extending
+    content inspection to them needs ecosystem-specific handling and is out of
+    scope here.
     """
     path = Path(ctx.local_path)
 
-    # Lock files — strong signal that deps are pinned
+    # Lock files - strong signal that deps are pinned
     lock_files = {
         "uv.lock": "uv (Python)",
         "poetry.lock": "Poetry (Python)",
@@ -60,7 +94,7 @@ def repro_deps_pinned_handler(
         "composer.lock": "Composer (PHP)",
     }
 
-    # Loose manifests without lock files — weak signal
+    # Loose manifests without lock files - weak signal
     loose_manifests = {
         "requirements.txt": "pip requirements",
         "setup.py": "setuptools",
@@ -87,18 +121,95 @@ def repro_deps_pinned_handler(
             continue
         found_loose.append(f"{filename} ({label})")
 
-    evidence = {
+    evidence: dict[str, Any] = {
         "lock_files_found": found_locks,
         "loose_manifests_found": found_loose,
     }
 
     if found_locks:
+        # Unchanged, deliberately: a lock file is judged first and its
+        # contents are never consulted (FR-001). This path must stay
+        # byte-identical across feature 037 (SC-004).
         return HandlerResult(
             status=HandlerResultStatus.PASS,
             message=f"Lock file(s) found: {', '.join(found_locks)}",
             confidence=0.8,  # a lock file proves deps were pinned once, not that it is current
             evidence=evidence,
         )
+
+    requirements = path / "requirements.txt"
+    if requirements.exists():
+        from .requirements_pins import FileClassification
+
+        report, unreadable = _inspect_requirements(requirements)
+        evidence["inspected_file"] = "requirements.txt"
+
+        if unreadable is not None:
+            evidence["classification"] = "not_inspectable"
+            evidence["not_inspectable_reason"] = unreadable
+            return HandlerResult(
+                status=HandlerResultStatus.FAIL,
+                message=(f"requirements.txt contents could not be inspected: {unreadable}. Judged on presence alone."),
+                confidence=0.8,
+                evidence=evidence,
+            )
+
+        evidence["classification"] = report.classification.value
+        evidence["requirement_count"] = len(report.lines)
+
+        if report.classification is FileClassification.NOT_INSPECTABLE:
+            evidence["not_inspectable_reason"] = report.reason
+            return HandlerResult(
+                status=HandlerResultStatus.FAIL,
+                message=(
+                    f"requirements.txt contents could not be fully inspected: "
+                    f"{report.reason}. Judged on presence alone."
+                ),
+                confidence=0.8,
+                evidence=evidence,
+            )
+
+        if report.classification is FileClassification.HASH_PINNED:
+            return HandlerResult(
+                status=HandlerResultStatus.PASS,
+                message=(
+                    f"requirements.txt: all {len(report.lines)} requirement(s) pinned to an exact version with a hash"
+                ),
+                confidence=0.8,
+                evidence=evidence,
+            )
+
+        if report.classification is FileClassification.VERSION_PINNED:
+            evidence["unhashed_examples"] = _sample(report.unhashed)
+            evidence["unhashed_count"] = len(report.unhashed)
+            return HandlerResult(
+                status=HandlerResultStatus.WARN,
+                message=(
+                    f"requirements.txt pins all {len(report.lines)} direct dependency(ies) "
+                    "to exact versions but carries no hashes, so transitive dependencies "
+                    "resolve at install time and are not pinned. A lock file or "
+                    "hash-pinned requirements would close this."
+                ),
+                confidence=0.8,
+                evidence=evidence,
+            )
+
+        if report.classification is FileClassification.UNPINNED:
+            evidence["unpinned_examples"] = _sample(report.unpinned)
+            evidence["unpinned_count"] = len(report.unpinned)
+            shown = ", ".join(_sample(report.unpinned)[:3])
+            return HandlerResult(
+                status=HandlerResultStatus.FAIL,
+                message=(f"requirements.txt has {len(report.unpinned)} unpinned requirement(s), including: {shown}"),
+                confidence=0.8,
+                evidence=evidence,
+            )
+
+        # NO_REQUIREMENTS: the file declares no dependencies, so it is evidence
+        # of neither good nor bad pinning practice. Treat it as absent and let
+        # any other loose manifest decide (FR-011).
+        found_loose = [f for f in found_loose if not f.startswith("requirements.txt")]
+        evidence["loose_manifests_found"] = found_loose
 
     if found_loose:
         return HandlerResult(
@@ -110,7 +221,7 @@ def repro_deps_pinned_handler(
 
     return HandlerResult(
         status=HandlerResultStatus.INCONCLUSIVE,
-        message="No dependency files found — cannot determine if deps are pinned",
+        message="No dependency files found \u2014 cannot determine if deps are pinned",
         confidence=0.0,
         evidence=evidence,
     )
@@ -120,38 +231,109 @@ def repro_build_env_declared_handler(
     config: dict[str, Any],
     ctx: HandlerContext,
 ) -> HandlerResult:
-    """Check that the build environment is explicitly declared.
+    """Check that the build environment is explicitly declared AND pinned.
 
-    Looks for Dockerfile, Nix flake, devcontainer, or similar.
-    PASS if found, INCONCLUSIVE if not.
+    Declarations come in two kinds. A Nix flake or a version file pins by
+    construction -- that is what they are for. A container build file pins only
+    if its `FROM` lines do, so it is read rather than merely noticed (feature
+    038, issue #431): `FROM alpine:latest` declares an environment that resolves
+    differently on every build, which is the opposite of what this control
+    claims to establish.
+
+    A stronger declaration wins: a repository with a flake and a floating
+    Dockerfile passes on the flake.
     """
+    from .container_pinning import ContainerClassification, classify
+
     path = Path(ctx.local_path)
 
-    env_files = {
-        "Dockerfile": "Docker",
+    # Pinned by construction -- contents cannot weaken them.
+    inherently_pinned = {
         "flake.nix": "Nix flake",
         "shell.nix": "Nix shell",
-        ".devcontainer": "Dev container",
-        "Vagrantfile": "Vagrant",
         ".tool-versions": "asdf version manager",
         ".nvmrc": "Node version manager",
         ".python-version": "pyenv",
     }
+    # Pinned only if their contents pin. Read.
+    container_files = {
+        "Dockerfile": "Docker",
+        "Containerfile": "Docker",
+    }
+    # Content-dependent in principle; not inspected in v0. A `.devcontainer`
+    # usually delegates to a Dockerfile or an image reference and a Vagrantfile
+    # names a box with an optional version, so both deserve the same treatment
+    # as Dockerfile eventually. Widening is detection work of the same shape as
+    # #433 and #446 and is deliberately not bundled here.
+    deferred = {
+        ".devcontainer": "Dev container",
+        "Vagrantfile": "Vagrant",
+    }
 
-    found = []
-    for name, label in env_files.items():
-        if (path / name).exists():
-            found.append(f"{name} ({label})")
+    def _present(names: dict[str, str]) -> list[str]:
+        return [f"{n} ({label})" for n, label in names.items() if (path / n).exists()]
 
-    evidence = {"env_files_found": found}
+    found_pinned = _present(inherently_pinned)
+    found_container = _present(container_files)
+    found_deferred = _present(deferred)
+    found = found_pinned + found_container + found_deferred
 
-    if found:
+    evidence: dict[str, Any] = {"env_files_found": found}
+
+    # Message construction is unchanged from before feature 038 on every PASS
+    # path, so repositories that still pass produce byte-identical output
+    # (SC-003, SC-006).
+    def _pass() -> HandlerResult:
         return HandlerResult(
             status=HandlerResultStatus.PASS,
             message=f"Build environment declared via: {', '.join(found)}",
             confidence=0.85,
             evidence=evidence,
         )
+
+    if found_pinned:
+        return _pass()
+
+    if found_container:
+        unpinned: list[str] = []
+        inspected: list[str] = []
+        for name in container_files:
+            target = path / name
+            if not target.exists():
+                continue
+            try:
+                report = classify(target.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError) as exc:
+                logger.debug("could not read %s: %s", target, exc)
+                continue
+            if report.classification is ContainerClassification.NO_IMAGES:
+                # Declares no base image, so it is evidence of neither good nor
+                # bad pinning. Treat it as absent and let another declaration
+                # decide (contract BE-11).
+                continue
+            inspected.append(name)
+            if report.classification is ContainerClassification.UNPINNED:
+                unpinned.extend(f"{name}: {ref}" for ref in report.unpinned)
+
+        evidence["containers_inspected"] = inspected
+        if unpinned:
+            evidence["unpinned_images"] = unpinned
+            return HandlerResult(
+                status=HandlerResultStatus.WARN,
+                message=(
+                    "Build environment is declared but not pinned: "
+                    f"{'; '.join(unpinned)} -- a tag is mutable, so the "
+                    "environment resolves differently on different builds. "
+                    "Pin by digest (image@sha256:...)"
+                ),
+                confidence=0.85,
+                evidence=evidence,
+            )
+        if inspected:
+            return _pass()
+
+    if found_deferred:
+        return _pass()
 
     return HandlerResult(
         status=HandlerResultStatus.INCONCLUSIVE,
@@ -185,6 +367,14 @@ _SUSPICIOUS_PATTERNS: tuple[str, ...] = (
     "yarn install",
     "apt-get install",
     "brew install",
+    # Feature 038 (#430): language-level installers fetch at build time exactly
+    # as the Python and Node ones above do. A version-pinned `go install
+    # pkg@v1.2.3` is still a fetch -- this control's subject is hermeticity, not
+    # determinism -- but the message names the pin so the two are distinguishable.
+    "go install ",
+    "go get ",
+    "cargo install ",
+    "gem install ",
 )
 
 # Known-safe: lock-file-based installs that do not fetch live deps
@@ -196,6 +386,16 @@ _SAFE_PATTERNS: tuple[str, ...] = (
     "npm ci",  # uses package-lock.json
     "yarn --frozen-lockfile",
     "pnpm install --frozen-lockfile",
+)
+
+# Compiler flags that make output depend on the build host (feature 038, #432).
+# `-O3` is deliberately absent: at a fixed toolchain it is deterministic, and the
+# non-determinism #432 describes comes from the unpinned toolchain rather than
+# the flag. Flagging it would fire on a large share of legitimate builds.
+_NONDETERMINISTIC_FLAGS: tuple[str, ...] = (
+    "-ffast-math",
+    "-march=native",
+    "-mtune=native",
 )
 
 # Inside a Dockerfile/Containerfile, system-package installs build the *image*
@@ -211,7 +411,28 @@ _DOCKERFILE_DEFERRED_PATTERNS: tuple[str, ...] = (
 )
 
 
-_ScanKind = Literal["safe", "deferred", "violation"]
+# Feature 038 (#432): `nondeterminism` is a separate kind from `violation`
+# so the two findings can carry separate messages. Reporting a compiler
+# flag through "Possible live network fetches" would be a false statement
+# about what was found.
+_ScanKind = Literal["safe", "deferred", "violation", "nondeterminism"]
+
+
+_INSTALLER_VERSION = re.compile(r"@(v?\d[\w.\-+]*|[0-9a-f]{40})\b")
+
+
+def _pinned_suffix(line: str, pattern: str | None) -> str:
+    """Name the pinned version on an installer violation (feature 038, FR-011).
+
+    `go install pkg@v1.2.3` is still a build-time fetch and still a violation --
+    this control's subject is hermeticity, not determinism. But a pinned fetch
+    is a smaller problem than a floating one, and the operator should be able to
+    see which they have without opening the file.
+    """
+    if not pattern or not pattern.startswith(("go install", "go get", "cargo install", "gem install")):
+        return ""
+    match = _INSTALLER_VERSION.search(_strip_comment(line))
+    return f" (pinned to {match.group(1)})" if match else ""
 
 
 def _scan_line(line: str, *, is_dockerfile: bool = False) -> tuple[str | None, _ScanKind]:
@@ -238,6 +459,13 @@ def _scan_line(line: str, *, is_dockerfile: bool = False) -> tuple[str | None, _
     for pat in _SUSPICIOUS_PATTERNS:
         if pat in clean:
             return pat.strip(), "violation"
+
+    # Feature 038 (#432). Checked after the suspicious patterns so a line doing
+    # both is reported as the fetch, which is the larger problem. Comments were
+    # already stripped above, so a flag mentioned in a comment cannot reach here.
+    for flag in _NONDETERMINISTIC_FLAGS:
+        if flag in clean:
+            return flag, "nondeterminism"
 
     return None, "safe"
 
@@ -357,7 +585,6 @@ def _iter_container_files(path: Path) -> list[Path]:
     return results[:_FILE_SCAN_LIMIT]
 
 
-
 # Bazel network sandbox flags — current name, negated shorthand, and the
 # deprecated pre-rename name (still honored by Bazel as an alias).
 _BAZEL_NETWORK_BLOCK_FLAGS: tuple[str, ...] = (
@@ -386,6 +613,36 @@ def _maybe_check_witness_attestation(
         return WitnessCheckResult(attempted=False, detail="witness attestation verification disabled via config")
 
     return check_witness_attestation(ctx)
+
+
+_NIX_CI_COMMANDS: tuple[str, ...] = ("nix build", "nix develop", "nix run", "nix flake")
+
+
+def _nix_signal_withheld(path: Path, ci_files: list[Path], dependency_results: dict[str, Any]) -> bool:
+    """True when a Nix build is present but RE-01.02 did not pass.
+
+    Feature 038 (FR-010). The Nix strong signal is gated on RE-01.02 having
+    PASSED, and #431 makes that verdict harder to earn. A repository with a
+    flake and a floating Dockerfile therefore loses a hermeticity PASS without
+    its flake having changed.
+
+    That propagation is intended -- the gate's premise is that RE-01.02
+    confirmed the declared environment, and it no longer does -- but it must be
+    visible. Without this, the operator sees a PASS disappear and has no way to
+    tell whether the flake stopped being detected.
+    """
+    if dependency_results.get("RE-01.02") == "PASS":
+        return False
+    if not (path / "flake.nix").exists():
+        return False
+    for f in ci_files:
+        try:
+            content = f.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        if any(cmd in content for cmd in _NIX_CI_COMMANDS):
+            return True
+    return False
 
 
 def _detect_strong_hermeticity_signal(
@@ -434,9 +691,7 @@ def _detect_strong_hermeticity_signal(
 
     if (path / "flake.nix").exists() and dependency_results.get("RE-01.02") == "PASS":
         nix_hits = sorted(
-            name
-            for name, content in ci_content.items()
-            if any(cmd in content for cmd in ("nix build", "nix develop", "nix run", "nix flake"))
+            name for name, content in ci_content.items() if any(cmd in content for cmd in _NIX_CI_COMMANDS)
         )
         if nix_hits:
             return f"Nix flake build in CI ({', '.join(nix_hits)})", witness_result
@@ -546,13 +801,16 @@ def repro_hermetic_build_handler(
     container_file_set = set(container_files)
     violations: list[str] = []
     deferred: list[str] = []
+    nondeterministic: list[str] = []
     files_scanned: list[str] = []
 
     # A verified Witness attestation that positively recorded network activity
     # is stronger evidence than the grep heuristic below — surface it as a
     # violation on its own rather than waiting for a matching CI-text pattern.
     if witness_result.verified and witness_result.network_clean is False:
-        violations.append(f"witness attestation ({witness_result.evidence.get('artifact', '?')}): {witness_result.detail}")
+        violations.append(
+            f"witness attestation ({witness_result.evidence.get('artifact', '?')}): {witness_result.detail}"
+        )
 
     for f in all_files:
         is_dockerfile = f in container_file_set
@@ -568,8 +826,10 @@ def repro_hermetic_build_handler(
         for line in lines:
             pattern, kind = _scan_line(line, is_dockerfile=is_dockerfile)
             if kind == "violation":
-                file_violation = f"{rel}: '{pattern}'"
+                file_violation = f"{rel}: '{pattern}'{_pinned_suffix(line, pattern)}"
                 break  # one violation per file is enough to flag it
+            elif kind == "nondeterminism" and pattern:
+                nondeterministic.append(f"{rel}: '{pattern}'")
             elif kind == "deferred" and pattern:
                 deferred.append(f"{rel}: '{pattern}' (image build context)")
 
@@ -580,6 +840,7 @@ def repro_hermetic_build_handler(
         "files_scanned": files_scanned,
         "violations_found": violations,
         "deferred_found": deferred,
+        "nondeterministic_flags_found": nondeterministic,
         "strong_signal": None,
     }
 
@@ -591,15 +852,41 @@ def repro_hermetic_build_handler(
             evidence=evidence,
         )
 
+    # Feature 038 (#432): reported separately from network fetches. Sharing the
+    # message above would tell the operator a compiler flag was a network fetch.
+    if nondeterministic:
+        return HandlerResult(
+            status=HandlerResultStatus.FAIL,
+            message=(
+                "Non-deterministic compiler flags in build files: "
+                f"{'; '.join(nondeterministic)} -- these make output depend on the "
+                "build host, so the build cannot be reproducible"
+            ),
+            confidence=0.7,
+            evidence=evidence,
+        )
+
     # Clean scan but no strong signal. Per the conservative-by-default principle,
     # grep absence is not proof of hermeticity — INCONCLUSIVE until a strong signal
     # or manual review confirms the build is hermetic.
+    withheld = _nix_signal_withheld(path, all_ci_files, ctx.dependency_results)
+    if withheld:
+        evidence["nix_signal_withheld"] = "RE-01.02 did not pass"
+    nix_note = (
+        " A Nix build was found in CI but is not counted as a strong signal "
+        "because RE-01.02 (BuildEnvDeclared) did not pass -- a flake that is not "
+        "the project's confirmed build environment is not conclusive on its own."
+        if withheld
+        else ""
+    )
+
     return HandlerResult(
         status=HandlerResultStatus.INCONCLUSIVE,
         message=(
             f"No suspicious patterns found in {len(files_scanned)} scanned file(s) — "
             "grep absence alone cannot confirm hermeticity; "
-            "a strong signal (Witness, Nix, Bazel sandbox) or manual review is needed"
+            "a strong signal (Witness, Nix, Bazel sandbox) or manual review is needed."
+            f"{nix_note}"
         ),
         confidence=0.4,
         evidence=evidence,
@@ -670,9 +957,17 @@ def repro_bit_for_bit_handler(
 ) -> HandlerResult:
     """Check for signals that the build is bit-for-bit reproducible.
 
-    Looks for SOURCE_DATE_EPOCH in CI (normalizes timestamps in builds)
-    and checks for reprotest or diffoscope configuration.
-    These are the most reliable signals without actually running the build twice.
+    Looks for SOURCE_DATE_EPOCH, reprotest and diffoscope in CI.
+
+    These are evidence of INTENT, not of achievement, and feature 038 (#445)
+    changed the verdict accordingly: signals found produce WARN, not PASS. A
+    build can set SOURCE_DATE_EPOCH and still embed absolute paths,
+    non-deterministic ordering, or a timestamp from elsewhere. Confirming the
+    control's actual claim -- that output is identical across independent
+    builds -- means building twice and comparing, which this scan does not do.
+
+    No signals found remains INCONCLUSIVE: a workflow-only scan cannot show
+    that their absence means a non-reproducible build.
     """
     path = Path(ctx.local_path)
     workflows_dir = path / ".github" / "workflows"
@@ -711,9 +1006,23 @@ def repro_bit_for_bit_handler(
     }
 
     if found_good:
+        # Feature 038 (#445). These signals are evidence of intent, not of
+        # achievement: a build can set SOURCE_DATE_EPOCH and still embed
+        # absolute paths, non-deterministic ordering, or a timestamp from
+        # elsewhere. Verifying the control's actual claim means building twice
+        # and comparing, which this scan does not do.
+        #
+        # WARN rather than PASS or INCONCLUSIVE. PASS asserts a property nobody
+        # checked. INCONCLUSIVE would send the pipeline on to `manual`, whose
+        # message discards the signal found here and leaves the operator unable
+        # to tell "no evidence" from "promising evidence, unverified".
         return HandlerResult(
-            status=HandlerResultStatus.PASS,
-            message=f"Reproducibility signals found: {'; '.join(found_good)}",
+            status=HandlerResultStatus.WARN,
+            message=(
+                f"Reproducibility signals found ({'; '.join(found_good)}), but "
+                "bit-for-bit reproducibility was not verified -- confirming it "
+                "requires building twice and comparing the output"
+            ),
             confidence=0.8,
             evidence=evidence,
         )

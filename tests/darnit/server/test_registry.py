@@ -191,3 +191,48 @@ class TestToolRegistry:
         registry = ToolRegistry()
         with pytest.raises(AttributeError):
             registry.load_handler(spec)
+
+
+class TestBuiltinSignatureStripping:
+    """The bound builtin must not expose the injected _framework_name.
+
+    functools.wraps makes inspect.signature follow __wrapped__ back to the
+    base function, which still declares _framework_name. FastMCP rejects
+    tool parameters starting with '_', so registry._load_builtin strips it
+    from the exposed signature.
+    """
+
+    def test_framework_name_absent_from_exposed_signature(self):
+        import inspect
+
+        from darnit.server.tools import BUILTIN_TOOLS
+
+        assert "_framework_name" in inspect.signature(BUILTIN_TOOLS["audit"]).parameters
+
+        registry = ToolRegistry()
+        spec = ToolSpec(
+            name="audit",
+            handler="",
+            description="Audit tool",
+            builtin="audit",
+        )
+        bound = registry._load_builtin(spec, "openssf-baseline")
+
+        params = inspect.signature(bound).parameters
+        assert "_framework_name" not in params
+        assert not any(name.startswith("_") for name in params)
+
+    def test_other_parameters_are_preserved(self):
+        import inspect
+
+        from darnit.server.tools import BUILTIN_TOOLS
+
+        base_params = [
+            name for name in inspect.signature(BUILTIN_TOOLS["audit"]).parameters if name != "_framework_name"
+        ]
+
+        registry = ToolRegistry()
+        spec = ToolSpec(name="audit", handler="", description="Audit tool", builtin="audit")
+        bound = registry._load_builtin(spec, "openssf-baseline")
+
+        assert list(inspect.signature(bound).parameters) == base_params

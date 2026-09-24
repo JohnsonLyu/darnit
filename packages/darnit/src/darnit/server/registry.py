@@ -195,6 +195,21 @@ class ToolRegistry:
             kwargs["_framework_name"] = framework_name
             return await base_fn(**kwargs)
 
+        # functools.wraps makes inspect.signature follow __wrapped__ back to
+        # base_fn, which still lists the injected `_framework_name`. Newer
+        # FastMCP rejects any tool parameter starting with '_', so strip it
+        # from the exposed signature (same approach as _bind_tool_config).
+        import inspect
+
+        sig = inspect.signature(base_fn)
+        bound_handler.__signature__ = sig.replace(
+            parameters=[
+                p
+                for name, p in sig.parameters.items()
+                if name != "_framework_name"
+            ]
+        )
+
         return bound_handler
 
     def get_tool(self, name: str) -> ToolSpec | None:
