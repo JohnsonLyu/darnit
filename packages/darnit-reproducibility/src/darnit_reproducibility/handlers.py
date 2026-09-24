@@ -5,6 +5,7 @@ They are deliberately conservative — when in doubt, return INCONCLUSIVE
 rather than falsely passing or failing.
 """
 
+import tomllib
 from pathlib import Path
 from typing import Any, Literal
 
@@ -14,6 +15,20 @@ from darnit.sieve.handler_registry import HandlerContext, HandlerResult, Handler
 from .witness_attestation import WitnessCheckResult, check_witness_attestation
 
 logger = get_logger("darnit_reproducibility.handlers")
+
+
+def _pyproject_declares_dependencies(path: Path) -> bool:
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return True
+
+    project = data.get("project", {})
+    return bool(
+        project.get("dependencies")
+        or project.get("optional-dependencies")
+        or "dependencies" in project.get("dynamic", [])
+    )
 
 
 def repro_deps_pinned_handler(
@@ -65,9 +80,12 @@ def repro_deps_pinned_handler(
 
     found_loose = []
     for filename, label in loose_manifests.items():
-        if (path / filename).exists():
-            # Only flag loose if no corresponding lock exists
-            found_loose.append(f"{filename} ({label})")
+        candidate = path / filename
+        if not candidate.exists():
+            continue
+        if filename == "pyproject.toml" and not _pyproject_declares_dependencies(candidate):
+            continue
+        found_loose.append(f"{filename} ({label})")
 
     evidence = {
         "lock_files_found": found_locks,

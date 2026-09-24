@@ -416,8 +416,20 @@ class TestRepoDepsPin:
         result = repro_deps_pinned_handler({}, make_ctx(tmp_path))
         assert result.status == HandlerResultStatus.FAIL
 
-    def test_fail_with_only_pyproject_toml(self, tmp_path: Path) -> None:
+    def test_inconclusive_with_pyproject_name_only(self, tmp_path: Path) -> None:
         (tmp_path / "pyproject.toml").write_text("[project]\nname = 'pkg'\n")
+        result = repro_deps_pinned_handler({}, make_ctx(tmp_path))
+        assert result.status == HandlerResultStatus.INCONCLUSIVE
+
+    def test_fail_with_pyproject_dependencies(self, tmp_path: Path) -> None:
+        (tmp_path / "pyproject.toml").write_text(
+            "[project]\nname = 'pkg'\ndependencies = ['requests>=2.0']\n"
+        )
+        result = repro_deps_pinned_handler({}, make_ctx(tmp_path))
+        assert result.status == HandlerResultStatus.FAIL
+
+    def test_fail_with_pyproject_dynamic_dependencies(self, tmp_path: Path) -> None:
+        (tmp_path / "pyproject.toml").write_text("[project]\nname = 'pkg'\ndynamic = ['dependencies']\n")
         result = repro_deps_pinned_handler({}, make_ctx(tmp_path))
         assert result.status == HandlerResultStatus.FAIL
 
