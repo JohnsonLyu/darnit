@@ -70,6 +70,7 @@ def format_result_text(result: dict) -> str:
         "WARN": "⚠",
         "ERROR": "!",
         "N/A": "-",
+        "PENDING_LLM": "~",
     }
     icon = status_icons.get(status, "?")
 
@@ -98,8 +99,13 @@ def format_results_text(results: list[CheckResult], framework_name: str, show_al
     failed = len(by_status.get("FAIL", []))
     warned = len(by_status.get("WARN", []))
     na = len(by_status.get("N/A", []))
+    errored = len(by_status.get("ERROR", []))
+    pending_llm = len(by_status.get("PENDING_LLM", []))
 
-    lines.append(f"Total: {total} | Pass: {passed} | Fail: {failed} | Warn: {warned} | N/A: {na}\n")
+    lines.append(
+        f"Total: {total} | Pass: {passed} | Fail: {failed} | Warn: {warned} | "
+        f"N/A: {na} | Error: {errored} | Pending LLM: {pending_llm}\n"
+    )
 
     # Show failures first
     if "FAIL" in by_status:
@@ -107,10 +113,22 @@ def format_results_text(results: list[CheckResult], framework_name: str, show_al
         for r in by_status["FAIL"]:
             lines.append(format_result_text(r))
 
+    # Show pending LLM
+    if "PENDING_LLM" in by_status:
+        lines.append(f"\n--- Pending LLM ({len(by_status['PENDING_LLM'])}) ---")
+        for r in by_status["PENDING_LLM"]:
+            lines.append(format_result_text(r))
+
     # Show warnings
     if "WARN" in by_status:
         lines.append("\n--- Warnings ---")
         for r in by_status["WARN"]:
+            lines.append(format_result_text(r))
+
+    # Show errors
+    if "ERROR" in by_status:
+        lines.append(f"\n--- Errors ({len(by_status['ERROR'])}) ---")
+        for r in by_status["ERROR"]:
             lines.append(format_result_text(r))
 
     # Show passes
@@ -129,7 +147,7 @@ def format_results_text(results: list[CheckResult], framework_name: str, show_al
     # documents every check for conformance evidence.
     if show_all:
         for status, group in by_status.items():
-            if status in ("FAIL", "WARN", "PASS"):
+            if status in ("FAIL", "WARN", "PASS", "ERROR", "PENDING_LLM"):
                 continue
             lines.append(f"\n--- {status} ({len(group)}) ---")
             for r in group:
@@ -149,6 +167,8 @@ def format_results_json(results: list[CheckResult], framework_name: str) -> str:
             "fail": len([r for r in results if r.get("status") == "FAIL"]),
             "warn": len([r for r in results if r.get("status") == "WARN"]),
             "na": len([r for r in results if r.get("status") == "N/A"]),
+            "error": len([r for r in results if r.get("status") == "ERROR"]),
+            "pending_llm": len([r for r in results if r.get("status") == "PENDING_LLM"]),
         },
     }
     return json.dumps(output, indent=2)
