@@ -53,13 +53,14 @@ New issues are labeled `needs triage` until they have been reviewed by a
 maintainer. Maintainers may apply additional labels to identify the affected
 module or interface:
 
-- `module-core` — darnit core
-- `module-baseline` — OpenSSF Baseline module
-- `module-amber` — Amber module
-- `module-gittuf` — gittuf module
-- `module-reproducibility` — Reproducibility module
-- `interface-cli` — command-line interface
-- `interface-mcp` — MCP interface
+- `module-core` - darnit core
+- `module-baseline` - OSPS Baseline module
+- `module-amber` - Amber module
+- `module-csl` - Community Specification License plugin
+- `module-gittuf` - gittuf module
+- `module-reproducibility` - Reproducibility module
+- `interface-cli` - command-line interface
+- `interface-mcp` - MCP interface
 
 Each module gets its own `module-<name>` label as it lands.
 
