@@ -458,17 +458,17 @@ class TestRepoDepsPin:
         assert result.status == HandlerResultStatus.FAIL
 
     def test_fail_with_only_environment_yml(self, tmp_path: Path) -> None:
-        (tmp_path / "environment.yml").write_text("name: env\n")
+        (tmp_path / "environment.yml").write_text("name: env\ndependencies:\n  - requests\n")
         result = repro_deps_pinned_handler({}, make_ctx(tmp_path))
         assert result.status == HandlerResultStatus.FAIL
 
     def test_fail_with_only_environment_yaml(self, tmp_path: Path) -> None:
-        (tmp_path / "environment.yaml").write_text("name: env\n")
+        (tmp_path / "environment.yaml").write_text("name: env\ndependencies:\n  - requests\n")
         result = repro_deps_pinned_handler({}, make_ctx(tmp_path))
         assert result.status == HandlerResultStatus.FAIL
 
     def test_fail_with_only_pipfile(self, tmp_path: Path) -> None:
-        (tmp_path / "Pipfile").write_text("[packages]\n")
+        (tmp_path / "Pipfile").write_text("[packages]\nrequests = '*'\n")
         result = repro_deps_pinned_handler({}, make_ctx(tmp_path))
         assert result.status == HandlerResultStatus.FAIL
 
@@ -484,6 +484,11 @@ class TestRepoDepsPin:
 
     def test_pass_with_bun_lockb(self, tmp_path: Path) -> None:
         (tmp_path / "bun.lockb").write_text("lock")
+        result = repro_deps_pinned_handler({}, make_ctx(tmp_path))
+        assert result.status == HandlerResultStatus.PASS
+
+    def test_pass_with_bun_lock(self, tmp_path: Path) -> None:
+        (tmp_path / "bun.lock").write_text("lock")
         result = repro_deps_pinned_handler({}, make_ctx(tmp_path))
         assert result.status == HandlerResultStatus.PASS
 

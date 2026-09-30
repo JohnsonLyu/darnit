@@ -87,6 +87,7 @@ def repro_deps_pinned_handler(
         "package-lock.json": "npm (Node)",
         "yarn.lock": "Yarn (Node)",
         "pnpm-lock.yaml": "pnpm (Node)",
+        "bun.lock": "Bun (Node)",
         "bun.lockb": "Bun (Node)",
         "Cargo.lock": "Cargo (Rust)",
         "go.sum": "Go modules",
