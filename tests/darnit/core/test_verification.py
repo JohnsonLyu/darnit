@@ -306,8 +306,8 @@ class TestPluginVerifier:
         assert result.signed is False
         assert result.cached is False
 
-    def test_verify_with_trusted_publisher_github_org(self, tmp_path: Path) -> None:
-        """Metadata publisher fallback still matches under the current substring rules."""
+    def test_unsigned_metadata_does_not_grant_trust(self, tmp_path: Path) -> None:
+        """Author text that contains a trusted publisher does not verify a strict run."""
         verifier = _verifier(
             tmp_path,
             allow_unsigned=False,
@@ -324,9 +324,30 @@ class TestPluginVerifier:
         ):
             result = verifier.verify_plugin("pytest")
 
-        assert result.verified is True
-        assert result.trusted is True
+        assert result.verified is False
+        assert result.trusted is False
         assert result.signed is False
+
+    def test_unsigned_allowed_remains_untrusted(self, tmp_path: Path) -> None:
+        """allow_unsigned accepts an unsigned package without marking it trusted."""
+        verifier = _verifier(
+            tmp_path,
+            allow_unsigned=True,
+            trusted_publishers=["https://github.com/pytest-dev"],
+        )
+
+        with (
+            patch.object(verifier, "_fetch_pypi_attestation", return_value=_AttestationLookup(kind="absent")),
+            patch.object(
+                verifier,
+                "_get_fallback_publisher",
+                return_value="https://github.com/pytest-dev/pytest",
+            ),
+        ):
+            result = verifier.verify_plugin("pytest")
+
+        assert result.verified is True
+        assert result.trusted is False
 
     def test_verify_uses_cache(self, tmp_path: Path) -> None:
         """A second call reuses the raw observation."""
@@ -472,6 +493,73 @@ class TestTrustedPublisherMatching:
         )
 
         assert verifier._is_publisher_trusted(attestation) is False
+
+    def test_org_url_rejects_owner_lookalike(self) -> None:
+        """An org URL does not match an owner that merely begins with that name."""
+        config = VerificationConfig(
+            allow_unsigned=False,
+            trusted_publishers=["https://github.com/my-org"],
+            use_default_publishers=False,
+        )
+        verifier = PluginVerifier(config)
+
+        assert (
+            verifier._is_publisher_trusted(AttestationInfo(subject="https://github.com/my-org-attacker/repo")) is False
+        )
+        assert verifier._is_publisher_trusted(AttestationInfo(repository="https://github.com/my-org/repo")) is True
+
+    def test_bare_owner_rejects_embedded_name(self) -> None:
+        """A bare owner matches that GitHub owner segment and no longer name."""
+        config = VerificationConfig(
+            allow_unsigned=False,
+            trusted_publishers=["kusari-oss"],
+            use_default_publishers=False,
+        )
+        verifier = PluginVerifier(config)
+
+        assert (
+            verifier._is_publisher_trusted(AttestationInfo(repository="https://github.com/not-kusari-oss/repo"))
+            is False
+        )
+        assert (
+            verifier._is_publisher_trusted(AttestationInfo(repository="https://github.com/kusari-oss-attacker/repo"))
+            is False
+        )
+        assert (
+            verifier._is_publisher_trusted(AttestationInfo(repository="https://github.com/kusari-oss/darnit")) is True
+        )
+
+    def test_github_host_must_be_exact(self) -> None:
+        config = VerificationConfig(
+            allow_unsigned=False,
+            trusted_publishers=["https://github.com/my-org"],
+            use_default_publishers=False,
+        )
+        verifier = PluginVerifier(config)
+
+        assert verifier._is_publisher_trusted(AttestationInfo(subject="https://evilgithub.com/my-org/repo")) is False
+
+    def test_repo_url_rejects_repo_lookalike(self) -> None:
+        config = VerificationConfig(
+            allow_unsigned=False,
+            trusted_publishers=["https://github.com/my-org/repo"],
+            use_default_publishers=False,
+        )
+        verifier = PluginVerifier(config)
+
+        assert verifier._is_publisher_trusted(AttestationInfo(subject="https://github.com/my-org/repo-evil")) is False
+        assert verifier._is_publisher_trusted(AttestationInfo(subject="https://github.com/my-org/repo")) is True
+
+    def test_email_does_not_match_by_substring(self) -> None:
+        config = VerificationConfig(
+            allow_unsigned=False,
+            trusted_publishers=["user@example.com"],
+            use_default_publishers=False,
+        )
+        verifier = PluginVerifier(config)
+
+        assert verifier._is_publisher_trusted(AttestationInfo(subject="user@example.com.attacker")) is False
+        assert verifier._is_publisher_trusted(AttestationInfo(subject="user@example.com")) is True
 
 
 class TestVerifyPluginFunction:
@@ -643,6 +731,22 @@ class TestPolicyReappliedAfterCache:
         )
 
         assert first.verified is True and first.trusted is True and first.cached is False
+        assert second.verified is False and second.trusted is False and second.cached is True
+        assert fetch.call_count == 1
+
+    def test_cached_lookalike_publisher_stays_rejected(self, tmp_path: Path) -> None:
+        identity = AttestationInfo(
+            subject="https://github.com/my-org-attacker/plugin",
+            repository="https://github.com/my-org-attacker/plugin",
+        )
+        policy = {
+            "allow_unsigned": False,
+            "use_default_publishers": False,
+            "trusted_publishers": ["https://github.com/my-org"],
+        }
+        first, second, fetch = _run_pair(tmp_path, policy, policy, _PROVENANCE, identity)
+
+        assert first.verified is False and first.trusted is False and first.cached is False
         assert second.verified is False and second.trusted is False and second.cached is True
         assert fetch.call_count == 1
 

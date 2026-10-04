@@ -55,24 +55,19 @@ _implementations: dict[str, ComplianceImplementation] | None = None
 _cache_policy: _PolicyKey | None = None
 
 
-def _resolve_distribution_name(ep: "EntryPoint") -> str:
+def _resolve_distribution_name(ep: "EntryPoint") -> str | None:
     """Return the installed distribution name backing an entry point.
 
     Verification looks plugins up by distribution name (``darnit-baseline``),
-    not by the entry-point slug (``openssf-baseline``). Entry points built by
-    hand have no ``dist``, so fall back to the slug.
+    not by the entry-point slug (``openssf-baseline``). An entry point with
+    no installed distribution identity cannot be verified, so this does not
+    fall back to ``ep.name``.
     """
     dist = getattr(ep, "dist", None)
     dist_name = getattr(dist, "name", None) if dist is not None else None
-    if dist_name:
-        return dist_name
-
-    logger.debug(
-        "Entry point '%s' carries no distribution metadata; verifying under "
-        "the entry-point name instead.",
-        ep.name,
-    )
-    return ep.name
+    if isinstance(dist_name, str) and dist_name.strip():
+        return dist_name.strip()
+    return None
 
 
 def discover_implementations(
@@ -118,6 +113,12 @@ def discover_implementations(
     for ep in eps:
         try:
             dist_name = _resolve_distribution_name(ep)
+            if dist_name is None:
+                logger.warning(
+                    "Skipping entry point '%s': its installed distribution identity could not be determined.",
+                    ep.name,
+                )
+                continue
 
             try:
                 verification_result = verifier.verify_plugin(dist_name)

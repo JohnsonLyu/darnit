@@ -211,16 +211,22 @@ class TestDistributionNameResolution:
         assert _resolve_distribution_name(ep) == "darnit-baseline"
 
     @pytest.mark.unit
-    def test_falls_back_when_dist_is_none(self):
-        """Falls back to the slug when ``ep.dist`` is None."""
+    def test_missing_dist_returns_none(self):
+        """No distribution metadata does not fall back to the entry-point slug."""
         ep = _fake_entry_point("reproducibility", dist_name=None)
-        assert _resolve_distribution_name(ep) == "reproducibility"
+        assert _resolve_distribution_name(ep) is None
+        assert _resolve_distribution_name(ep) != ep.name
 
     @pytest.mark.unit
-    def test_falls_back_when_dist_name_is_blank(self):
-        """An empty distribution name is treated as absent."""
+    def test_blank_dist_name_returns_none(self):
+        """A blank or non-string distribution name is not an identity."""
         ep = _fake_entry_point("gittuf", dist_name="")
-        assert _resolve_distribution_name(ep) == "gittuf"
+        assert _resolve_distribution_name(ep) is None
+
+        ep.dist.name = None
+        assert _resolve_distribution_name(ep) is None
+        ep.dist.name = "   "
+        assert _resolve_distribution_name(ep) is None
 
     @pytest.mark.unit
     def test_verifier_receives_distribution_name(
@@ -236,16 +242,17 @@ class TestDistributionNameResolution:
         assert verified_package_names == ["darnit-baseline"]
 
     @pytest.mark.unit
-    def test_verifier_receives_slug_when_dist_is_none(
-        self, fake_entry_points, verified_package_names
-    ):
-        """The fallback reaches the verifier and discovery still loads the plugin."""
-        fake_entry_points(_fake_entry_point("hello", dist_name=None))
+    def test_unresolved_distribution_is_skipped(self, fake_entry_points, verified_package_names):
+        """Missing distribution identity skips the entry point before verification."""
+        ep = _fake_entry_point("hello", dist_name=None)
+        fake_entry_points(ep)
 
         implementations = discover_implementations()
 
-        assert verified_package_names == ["hello"]
-        assert "stub-framework" in implementations
+        assert verified_package_names == []
+        assert "hello" not in verified_package_names
+        ep.load.assert_not_called()
+        assert "stub-framework" not in implementations
 
 
 class TestPolicyKey:

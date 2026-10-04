@@ -52,6 +52,7 @@ import hashlib
 import json
 import logging
 import time
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -93,9 +94,9 @@ class VerificationConfig:
             Set to True for local development, False for production.
         trusted_publishers: Additional trusted OIDC identities beyond defaults.
             These are merged with DEFAULT_TRUSTED_PUBLISHERS. Use:
-            - "https://github.com/your-org" (GitHub org URL)
-            - "your-org" (org name, substring match)
-            - "user@example.com" (email identity)
+            - "https://github.com/your-org" (GitHub org URL; owner segment)
+            - "your-org" (GitHub owner name)
+            - "user@example.com" (email identity, exact match)
         use_default_publishers: Whether to include DEFAULT_TRUSTED_PUBLISHERS.
             Set to False to only trust publishers you explicitly specify.
         cache_dir: Directory for caching verification results
@@ -381,6 +382,62 @@ class VerificationCache:
             logger.warning(f"Could not cache verification result: {e}")
 
 
+def _normalize_publisher_text(value: str) -> str:
+    """Strip surrounding whitespace and one trailing slash.
+
+    Comparison stays case-insensitive, which is how publisher strings were
+    already compared.
+    """
+    text = value.strip()
+    if text.endswith("/"):
+        text = text[:-1]
+    return text.casefold()
+
+
+def _github_path(value: str) -> tuple[str, ...] | None:
+    """Return the path segments of an http(s) ``github.com`` URL.
+
+    ``None`` means ``value`` is not a GitHub URL. The host must be exactly
+    ``github.com``; a lookalike host is not a GitHub identity.
+    """
+    parsed = urllib.parse.urlsplit(value.strip())
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    host = (parsed.hostname or "").casefold()
+    if host != "github.com":
+        return None
+    return tuple(part.casefold() for part in parsed.path.split("/") if part)
+
+
+def _publisher_identity_matches(trusted: str, identity: str) -> bool:
+    """Return whether ``trusted`` names the same publisher as ``identity``.
+
+    A GitHub org URL matches a repository on that exact owner. A full
+    repository URL matches only that repository. A bare owner name matches
+    only that GitHub owner segment. Every other identity, including email,
+    matches only by normalized equality.
+    """
+    trusted_text = _normalize_publisher_text(trusted)
+    identity_text = _normalize_publisher_text(identity)
+    if trusted_text == identity_text:
+        return True
+
+    trusted_path = _github_path(trusted)
+    identity_path = _github_path(identity)
+    if identity_path is None:
+        return False
+
+    if trusted_path is None:
+        # Bare owner: no slash and not an email address.
+        if "/" in trusted_text or "@" in trusted_text or not trusted_text or not identity_path:
+            return False
+        return identity_path[0] == trusted_text
+
+    if len(trusted_path) == 1:
+        return identity_path[0] == trusted_path[0]
+    return identity_path == trusted_path
+
+
 class PluginVerifier:
     """Sigstore-based plugin verifier.
 
@@ -587,10 +644,8 @@ class PluginVerifier:
     def _is_publisher_trusted(self, attestation: AttestationInfo) -> bool:
         """Check if the attestation's publisher is in the trusted list.
 
-        Matching rules:
-        1. Exact match: trusted_publisher == subject
-        2. Repository match: trusted_publisher in repository URL
-        3. Org match: trusted_publisher is a prefix of the repository
+        Subject, repository, and subjectAlternativeName are compared as
+        identities. Issuer and workflow are not publisher identities.
 
         Args:
             attestation: Attestation info with publisher identity
@@ -602,29 +657,15 @@ class PluginVerifier:
         if not all_trusted:
             return False
 
-        # Collect all identity strings to match against
-        identities = []
-        if attestation.subject:
-            identities.append(attestation.subject.lower())
-        if attestation.repository:
-            identities.append(attestation.repository.lower())
-        if attestation.subject_alternative_name:
-            identities.append(attestation.subject_alternative_name.lower())
-
+        identities = [
+            attestation.subject,
+            attestation.repository,
+            attestation.subject_alternative_name,
+        ]
         for trusted in all_trusted:
-            trusted_lower = trusted.lower()
             for identity in identities:
-                # Exact match
-                if trusted_lower == identity:
+                if identity and _publisher_identity_matches(trusted, identity):
                     return True
-                # Substring match (org in repo URL)
-                if trusted_lower in identity:
-                    return True
-                # Handle GitHub URL formats
-                # e.g., "kusari-oss" matches "https://github.com/kusari-oss/darnit"
-                if f"github.com/{trusted_lower}" in identity:
-                    return True
-
         return False
 
     def _get_fallback_publisher(self, package_name: str) -> str | None:
@@ -654,25 +695,12 @@ class PluginVerifier:
         except Exception:
             return None
 
-    def _metadata_publisher_trusted(self, metadata_publisher: str | None) -> bool:
-        """Apply the current publisher list to a package-metadata name.
-
-        This is the existing substring fallback used when a release has no
-        provenance. It is policy, so it runs after a cache read.
-        """
-        if not metadata_publisher:
-            return False
-        for trusted in self.config.get_all_trusted_publishers():
-            if trusted.lower() in metadata_publisher.lower():
-                return True
-        return False
-
     def _observe(self, package_name: str, version: str) -> VerificationCacheEntry:
         """Collect a raw observation for one installed version.
 
-        A completed lookup with no provenance is ``unsigned`` and records the
-        metadata publisher for later policy checks. A provenance bundle whose
-        identity could not be read is ``undetermined``, not unsigned.
+        A completed lookup with no provenance is ``unsigned``. Package metadata
+        is recorded on that observation and is not a publisher identity.
+        A provenance bundle whose identity could not be read is ``undetermined``.
         """
         lookup = self._fetch_pypi_attestation(package_name, version)
         if lookup.kind == "provenance" and lookup.data is not None:
@@ -761,15 +789,6 @@ class PluginVerifier:
                 warning=(f"Package '{entry.package}' signed by untrusted publisher: {entry.publisher}"),
             )
 
-        trusted = self._metadata_publisher_trusted(entry.metadata_publisher)
-        if trusted:
-            return VerificationResult(
-                verified=True,
-                publisher=entry.metadata_publisher,
-                trusted=True,
-                cached=cached,
-                warning="No Sigstore attestation, trusted based on package metadata",
-            )
         return VerificationResult(
             verified=self.config.allow_unsigned,
             publisher=entry.metadata_publisher,
