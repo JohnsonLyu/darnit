@@ -42,7 +42,7 @@ Example:
 Security:
     - Sigstore verification provides cryptographic proof of publisher identity
     - Trusted publishers are matched against OIDC certificate identity
-    - Cache results to handle Sigstore service unavailability
+    - The disk cache stores the lookup, not the allow_unsigned or publisher decision
     - Graceful degradation: warn but allow if configured with allow_unsigned=True
 """
 
@@ -55,7 +55,7 @@ import time
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from darnit.config.operator.schema import PluginSettings
@@ -204,11 +204,52 @@ class VerificationResult:
     warning: str | None = None
 
 
-class VerificationCache:
-    """Cache for verification results.
+# ``undetermined`` is not stored: a later run has to look again.
+CACHE_SCHEMA_VERSION = 1
+_CACHEABLE_STATUSES = frozenset({"signed", "unsigned", "invalid"})
+CacheStatus = Literal["signed", "unsigned", "invalid", "undetermined"]
+_LookupKind = Literal["provenance", "absent", "undetermined"]
 
-    Stores verification results to handle Sigstore unavailability
-    and reduce repeated verification calls.
+
+@dataclass
+class VerificationCacheEntry:
+    """Raw verification observation. Policy is applied when this is read.
+
+    ``signed`` means provenance was found and an identity was extracted.
+    ``unsigned`` means the release lookup completed and named no provenance.
+    ``invalid`` means verification failed; the current lookup does not emit it.
+    ``undetermined`` means the signing state could not be established.
+    """
+
+    schema_version: int
+    package: str
+    version: str
+    cached_at: float
+    status: CacheStatus
+    publisher: str | None = None
+    publisher_repo: str | None = None
+    metadata_publisher: str | None = None
+    attestation: AttestationInfo | None = None
+
+
+@dataclass
+class _AttestationLookup:
+    """One PyPI release lookup.
+
+    ``absent`` is a completed release with no provenance. ``undetermined``
+    (including HTTP 404) did not establish that fact and must not be cached.
+    """
+
+    kind: _LookupKind
+    data: dict[str, Any] | None = None
+
+
+class VerificationCache:
+    """Cache for raw verification observations.
+
+    Stores what a completed lookup found, not the allow_unsigned or publisher
+    decision. A file with no ``schema_version`` is an old decision record and
+    is a miss.
     """
 
     def __init__(self, cache_dir: Path, ttl: int = CACHE_EXPIRATION_SECONDS):
@@ -233,15 +274,17 @@ class VerificationCache:
         key = self._cache_key(package_name, version)
         return self.cache_dir / f"{key}.json"
 
-    def get(self, package_name: str, version: str) -> VerificationResult | None:
-        """Get cached verification result.
+    def get(self, package_name: str, version: str) -> VerificationCacheEntry | None:
+        """Get a cached observation.
+
+        Files without ``schema_version`` stored a policy decision and are misses.
 
         Args:
             package_name: Package name
             version: Package version
 
         Returns:
-            Cached VerificationResult or None if not cached/expired
+            Cached observation or None if not cached, expired, or an old schema.
         """
         cache_path = self._cache_path(package_name, version)
 
@@ -251,6 +294,14 @@ class VerificationCache:
         try:
             with open(cache_path, encoding="utf-8") as f:
                 data = json.load(f)
+
+            if not isinstance(data, dict) or data.get("schema_version") != CACHE_SCHEMA_VERSION:
+                logger.debug(f"Ignoring stale verification cache for {package_name}:{version}")
+                return None
+
+            status = data.get("status")
+            if status not in _CACHEABLE_STATUSES:
+                return None
 
             # Check expiration
             cached_time = data.get("cached_at", 0)
@@ -264,70 +315,68 @@ class VerificationCache:
                 attestation = AttestationInfo(
                     issuer=data["attestation"].get("issuer"),
                     subject=data["attestation"].get("subject"),
-                    subject_alternative_name=data["attestation"].get(
-                        "subject_alternative_name"
-                    ),
+                    subject_alternative_name=data["attestation"].get("subject_alternative_name"),
                     repository=data["attestation"].get("repository"),
                     workflow=data["attestation"].get("workflow"),
                 )
 
-            return VerificationResult(
-                verified=data.get("verified", False),
-                signed=data.get("signed", False),
+            return VerificationCacheEntry(
+                schema_version=CACHE_SCHEMA_VERSION,
+                package=package_name,
+                version=version,
+                cached_at=cached_time,
+                status=status,
                 publisher=data.get("publisher"),
                 publisher_repo=data.get("publisher_repo"),
-                trusted=data.get("trusted", False),
-                cached=True,
+                metadata_publisher=data.get("metadata_publisher"),
                 attestation=attestation,
-                error=data.get("error"),
-                warning=data.get("warning"),
             )
-        except (OSError, json.JSONDecodeError) as e:
+        except (OSError, json.JSONDecodeError, TypeError, AttributeError) as e:
             logger.debug(f"Could not read cache for {package_name}: {e}")
             return None
 
-    def set(
-        self, package_name: str, version: str, result: VerificationResult
-    ) -> None:
-        """Cache a verification result.
+    def set(self, package_name: str, version: str, entry: VerificationCacheEntry) -> None:
+        """Store a completed observation.
+
+        ``undetermined`` observations are not stored. A later lookup has to
+        decide the signing state for itself. A write replaces any file already
+        at this package/version path, including an old decision-shaped file.
 
         Args:
             package_name: Package name
             version: Package version
-            result: Verification result to cache
+            entry: Raw observation to store
         """
+        if entry.status not in _CACHEABLE_STATUSES:
+            return
+
         cache_path = self._cache_path(package_name, version)
-
-        try:
-            # Serialize attestation if present
-            attestation_data = None
-            if result.attestation:
-                attestation_data = {
-                    "issuer": result.attestation.issuer,
-                    "subject": result.attestation.subject,
-                    "subject_alternative_name": result.attestation.subject_alternative_name,
-                    "repository": result.attestation.repository,
-                    "workflow": result.attestation.workflow,
-                }
-
-            data = {
-                "verified": result.verified,
-                "signed": result.signed,
-                "publisher": result.publisher,
-                "publisher_repo": result.publisher_repo,
-                "trusted": result.trusted,
-                "attestation": attestation_data,
-                "error": result.error,
-                "warning": result.warning,
-                "cached_at": time.time(),
-                "package": package_name,
-                "version": version,
+        attestation_data = None
+        if entry.attestation is not None:
+            attestation_data = {
+                "issuer": entry.attestation.issuer,
+                "subject": entry.attestation.subject,
+                "subject_alternative_name": entry.attestation.subject_alternative_name,
+                "repository": entry.attestation.repository,
+                "workflow": entry.attestation.workflow,
             }
 
+        data = {
+            "schema_version": CACHE_SCHEMA_VERSION,
+            "package": package_name,
+            "version": version,
+            "cached_at": time.time(),
+            "status": entry.status,
+            "publisher": entry.publisher,
+            "publisher_repo": entry.publisher_repo,
+            "metadata_publisher": entry.metadata_publisher,
+            "attestation": attestation_data,
+        }
+
+        try:
             with open(cache_path, "w", encoding="utf-8") as f:
                 json.dump(data, f)
-
-            logger.debug(f"Cached verification result for {package_name}:{version}")
+            logger.debug(f"Cached verification observation for {package_name}:{version}")
         except OSError as e:
             logger.warning(f"Could not cache verification result: {e}")
 
@@ -357,7 +406,8 @@ class PluginVerifier:
         """
         self.config = config or VerificationConfig()
         self.cache = VerificationCache(
-            self.config.cache_dir, self.config.cache_ttl  # type: ignore[arg-type]
+            self.config.cache_dir,
+            self.config.cache_ttl,  # type: ignore[arg-type]
         )
         self._sigstore_available: bool | None = None
 
@@ -372,9 +422,7 @@ class PluginVerifier:
             self._sigstore_available = True
         except ImportError:
             self._sigstore_available = False
-            logger.info(
-                "Sigstore not available. Install with: pip install darnit-core[attestation]"
-            )
+            logger.info("Sigstore not available. Install with: pip install darnit-core[attestation]")
 
         return self._sigstore_available
 
@@ -402,24 +450,26 @@ class PluginVerifier:
             logger.debug(f"Could not get package info for {package_name}: {e}")
             return None
 
-    def _fetch_pypi_attestation(
-        self, package_name: str, version: str
-    ) -> dict[str, Any] | None:
+    def _fetch_pypi_attestation(self, package_name: str, version: str) -> _AttestationLookup:
         """Fetch attestation from PyPI for a package.
 
         PyPI provides attestations via the integrity API for packages
         that were published with Trusted Publishing (GitHub Actions OIDC).
+        A completed release with no provenance is ``absent``. HTTP 404 does not
+        prove the installed artifact is unsigned, so it is ``undetermined``,
+        as are other fetch failures and ``verify_online=False``.
 
         Args:
             package_name: Package name
             version: Package version
 
         Returns:
-            Attestation data dict or None if not available
+            The lookup outcome. Provenance descriptors are returned only when
+            the release JSON names one.
         """
         if not self.config.verify_online:
             logger.debug("Online verification disabled, skipping PyPI attestation fetch")
-            return None
+            return _AttestationLookup(kind="undetermined")
 
         try:
             # First get the package info to find the wheel/sdist filename
@@ -432,25 +482,28 @@ class PluginVerifier:
             for url_info in urls:
                 # Check for attestation digests (PEP 740)
                 if url_info.get("provenance"):
-                    return {
-                        "has_provenance": True,
-                        "provenance_url": url_info.get("provenance"),
-                        "filename": url_info.get("filename"),
-                        "digests": url_info.get("digests", {}),
-                    }
+                    return _AttestationLookup(
+                        kind="provenance",
+                        data={
+                            "has_provenance": True,
+                            "provenance_url": url_info.get("provenance"),
+                            "filename": url_info.get("filename"),
+                            "digests": url_info.get("digests", {}),
+                        },
+                    )
 
-            # No attestation found
-            return None
+            # The release exists and names no provenance.
+            return _AttestationLookup(kind="absent")
 
         except urllib.error.HTTPError as e:
             if e.code == 404:
                 logger.debug(f"No attestation found for {package_name}:{version}")
             else:
                 logger.debug(f"HTTP error fetching attestation: {e}")
-            return None
+            return _AttestationLookup(kind="undetermined")
         except Exception as e:
             logger.debug(f"Could not fetch PyPI attestation for {package_name}: {e}")
-            return None
+            return _AttestationLookup(kind="undetermined")
 
     def _verify_attestation_sigstore(
         self, attestation_data: dict[str, Any], package_name: str
@@ -499,6 +552,7 @@ class PluginVerifier:
                 envelope = provenance["dsseEnvelope"]
                 if "payload" in envelope:
                     import base64
+
                     payload = json.loads(base64.b64decode(envelope["payload"]))
                     predicate = payload.get("predicate", {})
 
@@ -600,101 +654,145 @@ class PluginVerifier:
         except Exception:
             return None
 
-    def _verify_with_sigstore(
-        self, package_name: str, version: str
-    ) -> VerificationResult:
-        """Verify package signature using Sigstore.
+    def _metadata_publisher_trusted(self, metadata_publisher: str | None) -> bool:
+        """Apply the current publisher list to a package-metadata name.
 
-        This fetches attestations from PyPI and verifies them using
-        Sigstore's verification infrastructure.
-
-        Args:
-            package_name: Package name
-            version: Package version
-
-        Returns:
-            VerificationResult with signature status
+        This is the existing substring fallback used when a release has no
+        provenance. It is policy, so it runs after a cache read.
         """
-        # Try to fetch attestation from PyPI
-        attestation_data = self._fetch_pypi_attestation(package_name, version)
+        if not metadata_publisher:
+            return False
+        for trusted in self.config.get_all_trusted_publishers():
+            if trusted.lower() in metadata_publisher.lower():
+                return True
+        return False
 
-        if attestation_data and attestation_data.get("has_provenance"):
-            # Verify the attestation
-            attestation_info = self._verify_attestation_sigstore(
-                attestation_data, package_name
+    def _observe(self, package_name: str, version: str) -> VerificationCacheEntry:
+        """Collect a raw observation for one installed version.
+
+        A completed lookup with no provenance is ``unsigned`` and records the
+        metadata publisher for later policy checks. A provenance bundle whose
+        identity could not be read is ``undetermined``, not unsigned.
+        """
+        lookup = self._fetch_pypi_attestation(package_name, version)
+        if lookup.kind == "provenance" and lookup.data is not None:
+            attestation = self._verify_attestation_sigstore(lookup.data, package_name)
+            if attestation is not None:
+                publisher = attestation.subject or attestation.repository or "unknown"
+                return VerificationCacheEntry(
+                    schema_version=CACHE_SCHEMA_VERSION,
+                    package=package_name,
+                    version=version,
+                    cached_at=0,
+                    status="signed",
+                    publisher=publisher,
+                    publisher_repo=attestation.repository,
+                    attestation=attestation,
+                )
+            return VerificationCacheEntry(
+                schema_version=CACHE_SCHEMA_VERSION,
+                package=package_name,
+                version=version,
+                cached_at=0,
+                status="undetermined",
             )
 
-            if attestation_info:
-                # Check if publisher is trusted
-                trusted = self._is_publisher_trusted(attestation_info)
-                publisher = (
-                    attestation_info.subject
-                    or attestation_info.repository
-                    or "unknown"
+        if lookup.kind == "absent":
+            return VerificationCacheEntry(
+                schema_version=CACHE_SCHEMA_VERSION,
+                package=package_name,
+                version=version,
+                cached_at=0,
+                status="unsigned",
+                metadata_publisher=self._get_fallback_publisher(package_name),
+            )
+
+        return VerificationCacheEntry(
+            schema_version=CACHE_SCHEMA_VERSION,
+            package=package_name,
+            version=version,
+            cached_at=0,
+            status="undetermined",
+        )
+
+    def _apply_policy(self, entry: VerificationCacheEntry, *, cached: bool) -> VerificationResult:
+        """Apply the live ``VerificationConfig`` to a raw observation.
+
+        ``verified`` and ``trusted`` are computed here and are not read from disk.
+        """
+        if entry.status == "invalid":
+            return VerificationResult(
+                verified=False,
+                publisher=entry.publisher,
+                publisher_repo=entry.publisher_repo,
+                cached=cached,
+                attestation=entry.attestation,
+                error=f"Package '{entry.package}' attestation failed verification",
+            )
+
+        if entry.status == "undetermined":
+            return VerificationResult(
+                verified=False,
+                cached=cached,
+                error=f"Could not determine whether package '{entry.package}' is signed",
+            )
+
+        if entry.status == "signed":
+            attestation = entry.attestation or AttestationInfo()
+            trusted = self._is_publisher_trusted(attestation)
+            if trusted:
+                return VerificationResult(
+                    verified=True,
+                    signed=True,
+                    publisher=entry.publisher,
+                    publisher_repo=entry.publisher_repo,
+                    trusted=True,
+                    cached=cached,
+                    attestation=attestation,
                 )
+            return VerificationResult(
+                verified=self.config.allow_unsigned,
+                signed=True,
+                publisher=entry.publisher,
+                publisher_repo=entry.publisher_repo,
+                trusted=False,
+                cached=cached,
+                attestation=attestation,
+                warning=(f"Package '{entry.package}' signed by untrusted publisher: {entry.publisher}"),
+            )
 
-                if trusted:
-                    return VerificationResult(
-                        verified=True,
-                        signed=True,
-                        publisher=publisher,
-                        publisher_repo=attestation_info.repository,
-                        trusted=True,
-                        attestation=attestation_info,
-                    )
-                else:
-                    # Signed but not by trusted publisher
-                    return VerificationResult(
-                        verified=self.config.allow_unsigned,
-                        signed=True,
-                        publisher=publisher,
-                        publisher_repo=attestation_info.repository,
-                        trusted=False,
-                        attestation=attestation_info,
-                        warning=f"Package '{package_name}' signed by untrusted publisher: {publisher}",
-                    )
-
-        # No attestation available - use fallback
-        fallback_publisher = self._get_fallback_publisher(package_name)
-
-        # Check if fallback publisher matches (for backwards compatibility)
-        trusted = False
-        if fallback_publisher:
-            for tp in self.config.get_all_trusted_publishers():
-                if tp.lower() in fallback_publisher.lower():
-                    trusted = True
-                    break
-
+        trusted = self._metadata_publisher_trusted(entry.metadata_publisher)
         if trusted:
             return VerificationResult(
                 verified=True,
-                signed=False,
-                publisher=fallback_publisher,
+                publisher=entry.metadata_publisher,
                 trusted=True,
+                cached=cached,
                 warning="No Sigstore attestation, trusted based on package metadata",
             )
-
         return VerificationResult(
             verified=self.config.allow_unsigned,
-            signed=False,
-            publisher=fallback_publisher,
+            publisher=entry.metadata_publisher,
             trusted=False,
-            warning=f"Package '{package_name}' has no Sigstore attestation",
+            cached=cached,
+            warning=f"Package '{entry.package}' has no Sigstore attestation",
         )
 
-    def verify_plugin(
-        self, package_name: str, use_cache: bool = True
-    ) -> VerificationResult:
+    def verify_plugin(self, package_name: str, use_cache: bool = True) -> VerificationResult:
         """Verify a plugin package.
+
+        The disk cache contributes a raw observation only. ``allow_unsigned`` and
+        the trusted-publisher list are applied to that observation on every call.
 
         Args:
             package_name: Name of the plugin package
-            use_cache: Whether to use cached results
+            use_cache: Whether to read a cached observation. A completed
+                observation is still recorded for a later call.
 
         Returns:
-            VerificationResult with verification status
+            VerificationResult with verification status. ``cached`` is true when
+            the observation was read from disk.
         """
-        # Get package info
         pkg_info = self._get_package_info(package_name)
         if pkg_info is None:
             return VerificationResult(
@@ -703,43 +801,35 @@ class PluginVerifier:
             )
 
         version = pkg_info["version"]
-
-        # Check cache first
+        entry: VerificationCacheEntry | None = None
+        from_cache = False
         if use_cache:
-            cached = self.cache.get(package_name, version)
-            if cached is not None:
+            entry = self.cache.get(package_name, version)
+            from_cache = entry is not None
+            if from_cache:
                 logger.debug(f"Using cached verification for {package_name}:{version}")
-                return cached
 
-        # Verify with Sigstore
-        result = self._verify_with_sigstore(package_name, version)
+        if entry is None:
+            entry = self._observe(package_name, version)
+            self.cache.set(package_name, version, entry)
 
-        # Cache the result
-        self.cache.set(package_name, version, result)
+        result = self._apply_policy(entry, cached=from_cache)
+        if from_cache:
+            return result
 
-        # Log appropriate messages
         if result.verified:
             if result.signed and result.trusted:
-                logger.info(
-                    f"Plugin '{package_name}' verified "
-                    f"(signed by trusted publisher: {result.publisher})"
-                )
+                logger.info(f"Plugin '{package_name}' verified (signed by trusted publisher: {result.publisher})")
             elif result.signed:
-                logger.warning(
-                    f"Plugin '{package_name}' signed by untrusted publisher: "
-                    f"{result.publisher}"
-                )
+                logger.warning(f"Plugin '{package_name}' signed by untrusted publisher: {result.publisher}")
             elif result.warning:
                 logger.warning(result.warning)
-        else:
-            if result.error:
-                logger.error(f"Plugin verification failed: {result.error}")
+        elif result.error:
+            logger.error(f"Plugin verification failed: {result.error}")
 
         return result
 
-    def verify_plugins(
-        self, package_names: list[str]
-    ) -> dict[str, VerificationResult]:
+    def verify_plugins(self, package_names: list[str]) -> dict[str, VerificationResult]:
         """Verify multiple plugin packages.
 
         Args:
@@ -798,7 +888,9 @@ __all__ = [
     "VerificationConfig",
     "VerificationResult",
     "VerificationCache",
+    "VerificationCacheEntry",
     "AttestationInfo",
     "verify_plugin",
     "DEFAULT_TRUSTED_PUBLISHERS",
+    "CACHE_SCHEMA_VERSION",
 ]
