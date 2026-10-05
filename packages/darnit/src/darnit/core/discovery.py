@@ -4,10 +4,9 @@ This module discovers installed compliance implementations via Python entry poin
 Implementations register under the 'darnit.implementations' group.
 """
 
-
 from typing import TYPE_CHECKING, NamedTuple
 
-from darnit.core.verification import PluginVerifier, VerificationConfig
+from darnit.core.verification import PluginVerifier, VerificationConfig, VerificationResult
 
 from .logging import get_logger
 from .plugin import ComplianceImplementation
@@ -70,6 +69,67 @@ def _resolve_distribution_name(ep: "EntryPoint") -> str | None:
     return None
 
 
+def _accept_plugin(name: str, result: VerificationResult, allow_unsigned: bool) -> bool:
+    """Return whether ``name`` may be loaded under ``result``.
+
+    ``allow_unsigned`` applies only to a completed unsigned observation and to
+    a signed plugin whose publisher is not trusted. Invalid and undetermined
+    results are skipped. A result with no status and ``verified`` false is
+    skipped rather than treated as unsigned.
+    """
+    status = result.status
+    verified = result.verified
+    trusted = result.trusted
+    error = result.error
+    warning = result.warning
+
+    if status == "unsigned":
+        if allow_unsigned and verified:
+            logger.warning("Plugin '%s' is not signed; unsigned plugins are allowed.", name)
+            return True
+        logger.warning("Skipping plugin '%s': it is not signed.", name)
+        return False
+
+    if status == "invalid":
+        if error:
+            logger.warning("Skipping plugin '%s': its attestation is invalid: %s.", name, error)
+        else:
+            logger.warning("Skipping plugin '%s': its attestation is invalid.", name)
+        return False
+
+    if status == "undetermined":
+        reason = str(error).strip().rstrip(".") if error else ""
+        if reason:
+            logger.warning(
+                "Skipping plugin '%s': signature state could not be determined: %s.",
+                name,
+                reason,
+            )
+        else:
+            logger.warning("Skipping plugin '%s': signature state could not be determined.", name)
+        return False
+
+    if status == "signed":
+        if verified and trusted:
+            return True
+        if verified:
+            if warning:
+                logger.warning("%s", warning)
+            return True
+        publisher = result.publisher or "an unknown publisher"
+        logger.warning(
+            "Skipping plugin '%s': signed by an untrusted publisher: %s.",
+            name,
+            publisher,
+        )
+        return False
+
+    if verified:
+        return True
+    logger.warning("Skipping plugin '%s': signature state could not be determined.", name)
+    return False
+
+
 def discover_implementations(
     plugins: "PluginSettings | None" = None,
 ) -> dict[str, ComplianceImplementation]:
@@ -124,25 +184,14 @@ def discover_implementations(
                 verification_result = verifier.verify_plugin(dist_name)
             except Exception as e:
                 logger.warning(
-                    f"Plugin verification errored for '{ep.name}', loading anyway because "
-                    f"allow_unsigned=True: {e}"
+                    "Skipping plugin '%s': signature state could not be determined: %s.",
+                    ep.name,
+                    e,
                 )
-                verification_result = None
+                continue
 
-            if verification_result is not None and not verification_result.verified:
-                message = verification_result.error or verification_result.warning or "unknown verification failure"
-
-                if verification_config.allow_unsigned:
-                    logger.warning(
-                        f"Plugin '{ep.name}' failed verification but will be loaded anyway: "
-                        f"{message}"
-                    )
-                else:
-                    logger.warning(
-                        f"Skipping plugin '{ep.name}' because verification failed: "
-                        f"{message}"
-                    )
-                    continue
+            if not _accept_plugin(ep.name, verification_result, verification_config.allow_unsigned):
+                continue
 
             # Load the entry point (calls the register() function)
             register_func = ep.load()

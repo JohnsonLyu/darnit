@@ -192,6 +192,9 @@ class VerificationResult:
         attestation: Detailed attestation information (if signed)
         error: Error message if verification failed
         warning: Warning message (e.g., for unsigned plugins)
+        status: Observation class. ``unsigned`` is a completed "not signed"
+            result. Not stored as a policy decision; the raw cache has its own
+            status.
     """
 
     verified: bool
@@ -203,6 +206,7 @@ class VerificationResult:
     attestation: AttestationInfo | None = None
     error: str | None = None
     warning: str | None = None
+    status: CacheStatus | None = None
 
 
 # ``undetermined`` is not stored: a later run has to look again.
@@ -755,14 +759,16 @@ class PluginVerifier:
                 publisher_repo=entry.publisher_repo,
                 cached=cached,
                 attestation=entry.attestation,
-                error=f"Package '{entry.package}' attestation failed verification",
+                error="attestation failed verification",
+                status="invalid",
             )
 
         if entry.status == "undetermined":
             return VerificationResult(
                 verified=False,
                 cached=cached,
-                error=f"Could not determine whether package '{entry.package}' is signed",
+                error="signing state could not be established",
+                status="undetermined",
             )
 
         if entry.status == "signed":
@@ -777,6 +783,7 @@ class PluginVerifier:
                     trusted=True,
                     cached=cached,
                     attestation=attestation,
+                    status="signed",
                 )
             return VerificationResult(
                 verified=self.config.allow_unsigned,
@@ -787,6 +794,7 @@ class PluginVerifier:
                 cached=cached,
                 attestation=attestation,
                 warning=(f"Package '{entry.package}' signed by untrusted publisher: {entry.publisher}"),
+                status="signed",
             )
 
         return VerificationResult(
@@ -795,6 +803,7 @@ class PluginVerifier:
             trusted=False,
             cached=cached,
             warning=f"Package '{entry.package}' has no Sigstore attestation",
+            status="unsigned",
         )
 
     def verify_plugin(self, package_name: str, use_cache: bool = True) -> VerificationResult:
@@ -812,11 +821,35 @@ class PluginVerifier:
             VerificationResult with verification status. ``cached`` is true when
             the observation was read from disk.
         """
+        try:
+            return self._verify_observed(package_name, use_cache=use_cache)
+        except Exception as exc:
+            return self._undetermined_result(package_name, exc, cached=False)
+
+    def _undetermined_result(self, package_name: str, exc: Exception, *, cached: bool) -> VerificationResult:
+        """An unexpected failure did not establish whether the package is signed."""
+        logger.debug(
+            "Plugin verification failed unexpectedly for %s: %s",
+            package_name,
+            exc,
+        )
+        return VerificationResult(
+            verified=False,
+            trusted=False,
+            cached=cached,
+            error=f"{type(exc).__name__}: {exc}",
+            status="undetermined",
+        )
+
+    def _verify_observed(self, package_name: str, *, use_cache: bool) -> VerificationResult:
+        """Look up a package and apply policy. Unexpected errors propagate."""
         pkg_info = self._get_package_info(package_name)
         if pkg_info is None:
             return VerificationResult(
                 verified=False,
+                trusted=False,
                 error=f"Package '{package_name}' not found",
+                status="undetermined",
             )
 
         version = pkg_info["version"]
@@ -832,20 +865,12 @@ class PluginVerifier:
             entry = self._observe(package_name, version)
             self.cache.set(package_name, version, entry)
 
-        result = self._apply_policy(entry, cached=from_cache)
-        if from_cache:
-            return result
-
-        if result.verified:
-            if result.signed and result.trusted:
-                logger.info(f"Plugin '{package_name}' verified (signed by trusted publisher: {result.publisher})")
-            elif result.signed:
-                logger.warning(f"Plugin '{package_name}' signed by untrusted publisher: {result.publisher}")
-            elif result.warning:
-                logger.warning(result.warning)
-        elif result.error:
-            logger.error(f"Plugin verification failed: {result.error}")
-
+        try:
+            result = self._apply_policy(entry, cached=from_cache)
+        except Exception as exc:
+            return self._undetermined_result(package_name, exc, cached=from_cache)
+        if result.verified and result.signed and result.trusted:
+            logger.info(f"Plugin '{package_name}' verified (signed by trusted publisher: {result.publisher})")
         return result
 
     def verify_plugins(self, package_names: list[str]) -> dict[str, VerificationResult]:

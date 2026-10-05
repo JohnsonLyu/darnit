@@ -1,5 +1,6 @@
 """Tests for darnit.core.discovery module."""
 
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -229,13 +230,9 @@ class TestDistributionNameResolution:
         assert _resolve_distribution_name(ep) is None
 
     @pytest.mark.unit
-    def test_verifier_receives_distribution_name(
-        self, fake_entry_points, verified_package_names
-    ):
+    def test_verifier_receives_distribution_name(self, fake_entry_points, verified_package_names):
         """Discovery verifies the distribution, not the entry-point slug."""
-        fake_entry_points(
-            _fake_entry_point("openssf-baseline", dist_name="darnit-baseline")
-        )
+        fake_entry_points(_fake_entry_point("openssf-baseline", dist_name="darnit-baseline"))
 
         discover_implementations()
 
@@ -296,9 +293,7 @@ class TestPolicyKey:
     @pytest.mark.unit
     def test_online_verification_is_part_of_the_key(self):
         """``verify_online`` decides whether an attestation is ever fetched."""
-        assert _policy_key(VerificationConfig()) != _policy_key(
-            VerificationConfig(verify_online=False)
-        )
+        assert _policy_key(VerificationConfig()) != _policy_key(VerificationConfig(verify_online=False))
 
     @pytest.mark.unit
     def test_cache_location_is_not_part_of_the_key(self, tmp_path):
@@ -348,9 +343,7 @@ class TestOperatorPolicyReachesVerification:
 
     @pytest.mark.unit
     def test_trusted_publishers_reach_verification(self, verifier_spy):
-        discover_implementations(
-            PluginSettings(trusted_publishers=["https://github.com/my-org"])
-        )
+        discover_implementations(PluginSettings(trusted_publishers=["https://github.com/my-org"]))
 
         publishers = verifier_spy.last.get_all_trusted_publishers()
         assert "https://github.com/my-org" in publishers
@@ -366,13 +359,13 @@ class TestOperatorPolicyReachesVerification:
         assert implementations == {}
 
     @pytest.mark.unit
-    def test_permissive_policy_loads_an_unverified_plugin(self, verifier_spy):
-        """Control for the test above: the same plugin loads under the default."""
+    def test_result_without_status_is_not_treated_as_unsigned(self, verifier_spy):
+        """A verified=False result that does not say it is unsigned is not loaded."""
         verifier_spy.verified = False
 
         implementations = discover_implementations(PluginSettings(allow_unsigned=True))
 
-        assert "stub-framework" in implementations
+        assert implementations == {}
 
     @pytest.mark.unit
     def test_get_implementation_forwards_the_policy(self, verifier_spy):
@@ -382,9 +375,7 @@ class TestOperatorPolicyReachesVerification:
 
     @pytest.mark.unit
     def test_register_implementation_handlers_forwards_the_policy(self, verifier_spy):
-        discovery.register_implementation_handlers(
-            "stub-framework", PluginSettings(allow_unsigned=False)
-        )
+        discovery.register_implementation_handlers("stub-framework", PluginSettings(allow_unsigned=False))
 
         assert verifier_spy.last.allow_unsigned is False
 
@@ -442,9 +433,7 @@ class TestPolicyAwareCache:
     @pytest.mark.unit
     def test_an_added_publisher_rebuilds_the_cache(self, verifier_spy):
         discover_implementations(PluginSettings(allow_unsigned=False))
-        discover_implementations(
-            PluginSettings(allow_unsigned=False, trusted_publishers=["https://github.com/my-org"])
-        )
+        discover_implementations(PluginSettings(allow_unsigned=False, trusted_publishers=["https://github.com/my-org"]))
 
         assert verifier_spy.runs == 2
 
@@ -460,3 +449,147 @@ class TestPolicyAwareCache:
 
         discover_implementations(PluginSettings(allow_unsigned=False))
         assert verifier_spy.runs == 2
+
+
+def _returning_verifier(result):
+    """A PluginVerifier stand-in that returns ``result`` from every check."""
+
+    class _Verifier:
+        def __init__(self, config):
+            self.config = config
+
+        def verify_plugin(self, package_name, use_cache=True):
+            return result
+
+    return _Verifier
+
+
+class _RaisingVerifier:
+    def __init__(self, config):
+        self.config = config
+
+    def verify_plugin(self, package_name, use_cache=True):
+        raise RuntimeError("verifier blew up")
+
+
+class TestDiscoveryDecisions:
+    """Load or skip from the observation status, not from allow_unsigned alone."""
+
+    @pytest.fixture(autouse=True)
+    def clear_discovery_cache(self):
+        clear_cache()
+        yield
+        clear_cache()
+
+    def _entry(self, fake_entry_points):
+        ep = _fake_entry_point("hello", dist_name="darnit-hello")
+        fake_entry_points(ep)
+        return ep
+
+    def _run(self, monkeypatch, result_or_verifier, allow_unsigned, caplog, fake_entry_points):
+        ep = self._entry(fake_entry_points)
+        if isinstance(result_or_verifier, type):
+            monkeypatch.setattr(discovery, "PluginVerifier", result_or_verifier)
+        else:
+            monkeypatch.setattr(discovery, "PluginVerifier", _returning_verifier(result_or_verifier))
+        settings = PluginSettings(allow_unsigned=allow_unsigned)
+        with caplog.at_level(logging.WARNING, logger="darnit.core.discovery"):
+            found = discover_implementations(settings)
+        return ep, found, caplog.text
+
+    @pytest.mark.unit
+    def test_verifier_exception_does_not_load_when_unsigned_is_allowed(self, monkeypatch, caplog, fake_entry_points):
+        ep, found, text = self._run(monkeypatch, _RaisingVerifier, True, caplog, fake_entry_points)
+
+        ep.load.assert_not_called()
+        assert found == {}
+        assert "could not be determined" in text
+        assert "loading anyway" not in text
+
+    @pytest.mark.unit
+    def test_verifier_exception_does_not_load_under_strict_policy(self, monkeypatch, caplog, fake_entry_points):
+        ep, found, text = self._run(monkeypatch, _RaisingVerifier, False, caplog, fake_entry_points)
+
+        ep.load.assert_not_called()
+        assert found == {}
+        assert "could not be determined" in text
+        assert "loading anyway" not in text
+
+    @pytest.mark.unit
+    def test_unsigned_plugin_is_allowed_with_an_advisory_warning(self, monkeypatch, caplog, fake_entry_points):
+        result = VerificationResult(verified=True, trusted=False, status="unsigned")
+        ep, found, text = self._run(monkeypatch, result, True, caplog, fake_entry_points)
+
+        ep.load.assert_called_once()
+        assert "stub-framework" in found
+        assert "Plugin 'hello' is not signed; unsigned plugins are allowed." in text
+        assert "failed verification" not in text
+
+    @pytest.mark.unit
+    def test_unsigned_plugin_is_skipped_when_strict(self, monkeypatch, caplog, fake_entry_points):
+        result = VerificationResult(verified=False, trusted=False, status="unsigned")
+        ep, found, text = self._run(monkeypatch, result, False, caplog, fake_entry_points)
+
+        ep.load.assert_not_called()
+        assert found == {}
+        assert "Skipping plugin 'hello': it is not signed." in text
+
+    @pytest.mark.unit
+    def test_invalid_plugin_is_skipped_even_when_unsigned_is_allowed(self, monkeypatch, caplog, fake_entry_points):
+        result = VerificationResult(
+            verified=False,
+            trusted=False,
+            status="invalid",
+            error="attestation failed verification",
+        )
+        ep, found, text = self._run(monkeypatch, result, True, caplog, fake_entry_points)
+
+        ep.load.assert_not_called()
+        assert found == {}
+        assert "Skipping plugin 'hello': its attestation is invalid" in text
+        assert "loading" not in text
+
+    @pytest.mark.unit
+    def test_undetermined_plugin_is_skipped_even_when_unsigned_is_allowed(self, monkeypatch, caplog, fake_entry_points):
+        result = VerificationResult(
+            verified=False,
+            trusted=False,
+            status="undetermined",
+            error="signing state could not be established",
+        )
+        ep, found, text = self._run(monkeypatch, result, True, caplog, fake_entry_points)
+
+        ep.load.assert_not_called()
+        assert found == {}
+        assert "signature state could not be determined" in text
+        assert "it is not signed" not in text
+        assert "attestation is invalid" not in text
+
+    @pytest.mark.unit
+    def test_missing_status_and_unverified_fails_closed(self, monkeypatch, caplog, fake_entry_points):
+        result = VerificationResult(verified=False, error="no Sigstore attestation")
+        ep, found, text = self._run(monkeypatch, result, True, caplog, fake_entry_points)
+
+        ep.load.assert_not_called()
+        assert found == {}
+        assert "could not be determined" in text
+        assert "loading anyway" not in text
+
+    @pytest.mark.unit
+    def test_signed_untrusted_plugin_may_load_without_being_called_unsigned(
+        self, monkeypatch, caplog, fake_entry_points
+    ):
+        result = VerificationResult(
+            verified=True,
+            signed=True,
+            trusted=False,
+            status="signed",
+            publisher="https://github.com/other/repo",
+            warning="Package 'darnit-hello' signed by untrusted publisher: https://github.com/other/repo",
+        )
+        ep, found, text = self._run(monkeypatch, result, True, caplog, fake_entry_points)
+
+        ep.load.assert_called_once()
+        assert "stub-framework" in found
+        assert "not signed" not in text
+        assert "untrusted publisher" in text

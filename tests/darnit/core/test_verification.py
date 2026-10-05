@@ -291,6 +291,7 @@ class TestPluginVerifier:
         result = verifier.verify_plugin("nonexistent-package-12345")
 
         assert result.verified is False
+        assert result.status == "undetermined"
         assert "not found" in result.error.lower()
 
     def test_verify_installed_package_allow_unsigned(self, tmp_path: Path) -> None:
@@ -304,6 +305,7 @@ class TestPluginVerifier:
 
         assert result.verified is True
         assert result.signed is False
+        assert result.status == "unsigned"
         assert result.cached is False
 
     def test_unsigned_metadata_does_not_grant_trust(self, tmp_path: Path) -> None:
@@ -713,8 +715,10 @@ class TestPolicyReappliedAfterCache:
             identity,
         )
 
-        assert first.verified is True and first.trusted is True and first.cached is False
-        assert second.verified is False and second.trusted is False and second.cached is True
+        assert first.verified is True and first.trusted is True and first.status == "signed"
+        assert first.cached is False
+        assert second.verified is False and second.trusted is False and second.status == "signed"
+        assert second.cached is True
         assert fetch.call_count == 1
 
     def test_default_publishers_are_reapplied_to_a_cached_identity(self, tmp_path: Path) -> None:
@@ -823,6 +827,7 @@ class TestPolicyReappliedAfterCache:
             result = verifier.verify_plugin("evil-plugin")
 
         assert result.verified is False
+        assert result.status == "invalid"
         assert result.cached is True
         assert fetch.call_count == 0
 
@@ -834,11 +839,49 @@ class TestPolicyReappliedAfterCache:
             second = verifier.verify_plugin("evil-plugin")
 
         assert first.verified is False
+        assert first.status == "undetermined"
         assert first.cached is False
         assert second.verified is False
+        assert second.status == "undetermined"
         assert second.cached is False
         assert list(tmp_path.glob("*.json")) == []
         assert fetch.call_count == 2
+
+    def test_unexpected_exception_is_undetermined_and_not_cached(self, tmp_path: Path) -> None:
+        """An unexpected verifier error is not an unsigned success and is not stored."""
+        verifier = _verifier(tmp_path, allow_unsigned=True)
+
+        def _boom(package_name, version):
+            raise RuntimeError("verifier blew up")
+
+        with _installed(verifier), patch.object(verifier, "_observe", side_effect=_boom):
+            result = verifier.verify_plugin("evil-plugin")
+
+        assert result.verified is False
+        assert result.trusted is False
+        assert result.status == "undetermined"
+        assert result.cached is False
+        assert "RuntimeError" in result.error
+        assert list(tmp_path.glob("*.json")) == []
+
+    def test_policy_exception_after_cache_hit_keeps_cached_flag(self, tmp_path: Path) -> None:
+        """A disk hit stays cached=True when policy application fails afterward."""
+        verifier = _verifier(tmp_path, allow_unsigned=True)
+        verifier.cache.set(
+            "evil-plugin",
+            "1.2.3",
+            _entry(package="evil-plugin", version="1.2.3", status="unsigned"),
+        )
+
+        with (
+            _installed(verifier),
+            patch.object(verifier, "_apply_policy", side_effect=RuntimeError("policy")),
+        ):
+            result = verifier.verify_plugin("evil-plugin")
+
+        assert result.status == "undetermined"
+        assert result.verified is False
+        assert result.cached is True
 
     def test_http_404_is_not_cached(self, tmp_path: Path) -> None:
         """A missing PyPI release is not proof the installed artifact is unsigned."""
