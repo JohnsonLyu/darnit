@@ -883,21 +883,29 @@ class TestPolicyReappliedAfterCache:
         assert result.verified is False
         assert result.cached is True
 
-    def test_http_404_is_not_cached(self, tmp_path: Path) -> None:
-        """A missing PyPI release is not proof the installed artifact is unsigned."""
+    def test_http_404_for_installed_package_is_unsigned(self, tmp_path: Path) -> None:
+        """A 404 for an installed version is an unsigned observation and is cached."""
         verifier = _verifier(tmp_path, allow_unsigned=True)
         missing = urllib.error.HTTPError("https://pypi.org/pypi/evil-plugin/1.2.3/json", 404, "missing", None, None)
         with (
             _installed(verifier),
+            patch.object(verifier, "_get_fallback_publisher", return_value=None),
             patch("darnit.core.verification.urllib.request.urlopen", side_effect=missing) as opened,
         ):
             first = verifier.verify_plugin("evil-plugin")
             second = verifier.verify_plugin("evil-plugin")
 
-        assert first.verified is False and first.cached is False
-        assert second.cached is False
-        assert list(tmp_path.glob("*.json")) == []
-        assert opened.call_count == 2
+        assert first.status == "unsigned"
+        assert first.verified is True
+        assert first.trusted is False
+        assert first.cached is False
+        assert second.status == "unsigned"
+        assert second.cached is True
+        stored = json.loads(next(tmp_path.glob("*.json")).read_text(encoding="utf-8"))
+        assert stored["status"] == "unsigned"
+        assert stored["schema_version"] == CACHE_SCHEMA_VERSION
+        assert "verified" not in stored
+        assert opened.call_count == 1
 
     def test_unreadable_bundle_is_not_cached_as_unsigned(self, tmp_path: Path) -> None:
         verifier = _verifier(tmp_path, allow_unsigned=True)
@@ -945,7 +953,7 @@ class TestPolicyReappliedAfterCache:
             None,
         )
         with patch("darnit.core.verification.urllib.request.urlopen", side_effect=missing):
-            assert verifier._fetch_pypi_attestation("pkg", "1.0.0").kind == "undetermined"
+            assert verifier._fetch_pypi_attestation("pkg", "1.0.0").kind == "absent"
         with patch("darnit.core.verification.urllib.request.urlopen", side_effect=failed):
             assert verifier._fetch_pypi_attestation("pkg", "1.0.0").kind == "undetermined"
         with patch(

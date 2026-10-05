@@ -516,9 +516,10 @@ class PluginVerifier:
 
         PyPI provides attestations via the integrity API for packages
         that were published with Trusted Publishing (GitHub Actions OIDC).
-        A completed release with no provenance is ``absent``. HTTP 404 does not
-        prove the installed artifact is unsigned, so it is ``undetermined``,
-        as are other fetch failures and ``verify_online=False``.
+        A completed release with no provenance is ``absent``. HTTP 404 for an
+        installed version is also ``absent``: PyPI has no release to attest, so
+        the package is unsigned. Other HTTP errors, network failures, and
+        ``verify_online=False`` are ``undetermined``.
 
         Args:
             package_name: Package name
@@ -558,9 +559,9 @@ class PluginVerifier:
 
         except urllib.error.HTTPError as e:
             if e.code == 404:
-                logger.debug(f"No attestation found for {package_name}:{version}")
-            else:
-                logger.debug(f"HTTP error fetching attestation: {e}")
+                logger.debug(f"No PyPI release for installed package {package_name}:{version}")
+                return _AttestationLookup(kind="absent")
+            logger.debug(f"HTTP error fetching attestation: {e}")
             return _AttestationLookup(kind="undetermined")
         except Exception as e:
             logger.debug(f"Could not fetch PyPI attestation for {package_name}: {e}")

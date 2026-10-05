@@ -1,7 +1,8 @@
 """Tests for darnit.core.discovery module."""
 
 import logging
-from unittest.mock import MagicMock
+import urllib.error
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -593,3 +594,33 @@ class TestDiscoveryDecisions:
         assert "stub-framework" in found
         assert "not signed" not in text
         assert "untrusted publisher" in text
+
+    @pytest.mark.unit
+    def test_pypi_404_for_installed_plugin_follows_unsigned_policy(self, caplog, fake_entry_points):
+        """An installed plugin PyPI does not publish is unsigned, not undetermined."""
+        missing = urllib.error.HTTPError(
+            "https://pypi.org/pypi/darnit-hello/0.1.0/json", 404, "missing", None, None
+        )
+        allowed = _fake_entry_point("hello", dist_name="darnit-hello")
+        fake_entry_points(allowed)
+        with (
+            patch("darnit.core.verification.urllib.request.urlopen", side_effect=missing),
+            caplog.at_level(logging.WARNING, logger="darnit.core.discovery"),
+        ):
+            found = discover_implementations(PluginSettings(allow_unsigned=True))
+        allowed.load.assert_called_once()
+        assert "stub-framework" in found
+        assert "unsigned plugins are allowed" in caplog.text
+
+        clear_cache()
+        caplog.clear()
+        refused = _fake_entry_point("hello", dist_name="darnit-hello")
+        fake_entry_points(refused)
+        with (
+            patch("darnit.core.verification.urllib.request.urlopen", side_effect=missing),
+            caplog.at_level(logging.WARNING, logger="darnit.core.discovery"),
+        ):
+            found = discover_implementations(PluginSettings(allow_unsigned=False))
+        refused.load.assert_not_called()
+        assert found == {}
+        assert "Skipping plugin 'hello': it is not signed." in caplog.text
